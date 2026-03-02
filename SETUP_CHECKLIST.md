@@ -55,10 +55,10 @@ Without approvals, the bot will fail when placing orders.
 ## 4. Configure the Bot
 
 ```bash
-cp .env.example .env
+cp .env.example PMSC.env
 ```
 
-Edit `.env`:
+Edit `PMSC.env`:
 
 ```bash
 PRIVATE_KEY=0xYOUR_KEY_HERE
@@ -118,7 +118,7 @@ Or simply remove `DRY_RUN` or set `DRY_RUN=false`.
 
 ## Security
 
-- Do **not** commit `.env` or share your private key
-- `.env` is in `.gitignore`
+- Do **not** commit `PMSC.env` or share your private key
+- `PMSC.env` is in `.gitignore`
 - Use a dedicated wallet for the bot, not your main account
 - Consider rotating the key if it’s ever exposed

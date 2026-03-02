@@ -22,10 +22,10 @@ pip install -r requirements.txt
 
 ### 2. Environment Variables
 
-Copy `.env.example` to `.env` and configure:
+Copy `.env.example` to `PMSC.env` and configure:
 
 ```bash
-cp .env.example .env
+cp .env.example PMSC.env
 ```
 
 | Variable | Required | Description |

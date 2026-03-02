@@ -6,7 +6,7 @@ A market maker that posts two-sided quotes on Polymarket's 5-minute Bitcoin
 Up/Down prediction markets. Earns the spread by providing liquidity.
 
 Setup:
-  1. Copy .env.example to .env
+  1. Copy .env.example to PMSC.env
   2. Set PRIVATE_KEY (your Polygon wallet with USDC.e)
   3. Ensure token approvals are set (see README)
   4. Run: python main.py
@@ -52,7 +52,7 @@ def main():
     config = BotConfig()
 
     if not config.private_key and not config.dry_run:
-        logger.error("Set PRIVATE_KEY in .env or use DRY_RUN=true")
+        logger.error("Set PRIVATE_KEY in PMSC.env or use DRY_RUN=true")
         sys.exit(1)
 
     if config.dry_run:
