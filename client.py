@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs, OrderType, PostOrdersArgs
+from py_clob_client.clob_types import OrderArgs, OrderType, PostOrdersArgs, PartialCreateOrderOptions
 from py_clob_client.order_builder.constants import BUY, SELL
 
 from config import BotConfig
@@ -42,7 +42,13 @@ def create_client(config: BotConfig, read_only: bool = False) -> Optional[ClobCl
 def get_midpoint(client: ClobClient, token_id: str) -> Optional[float]:
     """Get the midpoint price for a token."""
     try:
-        mid = client.get_midpoint(token_id)
+        raw = client.get_midpoint(token_id)
+        if raw is None:
+            return None
+        if isinstance(raw, dict):
+            mid = raw.get("mid") or raw.get("midpoint") or raw.get("price")
+        else:
+            mid = raw
         return float(mid) if mid is not None else None
     except Exception as e:
         logger.warning("Failed to get midpoint for %s: %s", token_id[:20], e)
@@ -114,11 +120,13 @@ def post_two_sided_quotes(
         if use_gtd:
             bid_kw["expiration"] = exp_ts
 
-        bid_order = client.create_order(OrderArgs(**bid_kw))
+        # Polymarket prediction markets use neg_risk=True (avoids 404 on some tokens)
+        opts = PartialCreateOrderOptions(neg_risk=True)
+        bid_order = client.create_order(OrderArgs(**bid_kw), opts)
         orders.append(
             PostOrdersArgs(
                 order=bid_order,
-                order_type=OrderType.GTD if use_gtd else OrderType.GTC,
+                orderType=OrderType.GTD if use_gtd else OrderType.GTC,
             )
         )
 
@@ -131,16 +139,20 @@ def post_two_sided_quotes(
         if use_gtd:
             ask_kw["expiration"] = exp_ts
 
-        ask_order = client.create_order(OrderArgs(**ask_kw))
+        ask_order = client.create_order(OrderArgs(**ask_kw), opts)
         orders.append(
             PostOrdersArgs(
                 order=ask_order,
-                order_type=OrderType.GTD if use_gtd else OrderType.GTC,
+                orderType=OrderType.GTD if use_gtd else OrderType.GTC,
             )
         )
 
         resp = client.post_orders(orders)
-        if resp and (resp.get("success") or resp.get("orderIDs")):
+        if isinstance(resp, list) and len(resp) > 0:
+            # Batch endpoint returns list of order responses
+            logger.info("Posted quotes: bid=%.3f ask=%.3f on %s", bid_price, ask_price, market.event_slug[:30])
+            return True
+        elif isinstance(resp, dict) and (resp.get("success") or resp.get("orderIDs") or resp.get("orderID")):
             logger.info("Posted quotes: bid=%.3f ask=%.3f on %s", bid_price, ask_price, market.event_slug[:30])
             return True
         logger.warning("Post orders response: %s", resp)
