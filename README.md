@@ -63,9 +63,9 @@ Edit `config.py` or set env vars:
 | `max_position_per_market` | 14 | Max $ per 5-min market |
 | `max_total_capital` | 72 | Total capital to work with |
 | `max_active_markets` | 5 | Max markets quoted at once |
-| `spread_bps` | 50 | Spread in basis points (0.5%) |
-| `quote_refresh_seconds` | 30 | Quote refresh interval |
-| `minutes_before_resolution_to_stop` | 1 | Stop quoting N min before resolution |
+| `spread_bps` | 40 | Spread in basis points (0.4%; tighter = more fills) |
+| `quote_refresh_seconds` | 25 | Quote refresh interval (faster = more competitive) |
+| `minutes_before_resolution_to_stop` | 2 | Stop quoting N min before resolution (safer) |
 
 See [SETUP_CHECKLIST.md](SETUP_CHECKLIST.md) for the full setup flow.
 

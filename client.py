@@ -64,6 +64,23 @@ def get_tick_size(client: ClobClient, token_id: str) -> Optional[str]:
         return None
 
 
+def fee_rate_available(client: ClobClient, token_id: str) -> bool:
+    """
+    Check if fee rate is available for this token (avoids 404 during order creation).
+    Some newly listed markets don't have fee rate yet - skip them.
+    """
+    try:
+        client.get_fee_rate_bps(token_id)
+        return True
+    except Exception as e:
+        if hasattr(e, "status_code") and e.status_code == 404:
+            return False
+        err_str = str(e).lower()
+        if "404" in err_str or "fee rate not found" in err_str:
+            return False
+        raise
+
+
 def _market_expiration_ts(market: BTCMarket, buffer_seconds: int = 60) -> Optional[int]:
     """Unix timestamp when quotes should expire (market end minus buffer)."""
     try:

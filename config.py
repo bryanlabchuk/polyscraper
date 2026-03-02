@@ -22,13 +22,13 @@ class BotConfig:
     signature_type: int = 0  # 0=EOA, 1=Magic/email
 
     # Market maker params
-    spread_bps: int = 50  # 0.5% spread (50 basis points)
+    spread_bps: int = 40  # 0.4% spread (40 bps) - tighter = more fills, wider = less adverse selection
     order_size: float = 14.0  # USDC per side (~$14 max exposure per 5-min market)
     max_position_per_market: float = 14.0  # Max exposure per 5-min market
     max_total_capital: float = 72.0  # Total capital to work with
     max_active_markets: int = 5  # Max markets to quote (14 * 5 = 70, under 72)
-    quote_refresh_seconds: int = 30  # How often to refresh quotes
-    minutes_before_resolution_to_stop: int = 1  # Stop quoting 1 min before resolution
+    quote_refresh_seconds: int = 25  # How often to refresh quotes (faster = more competitive)
+    minutes_before_resolution_to_stop: int = 2  # Stop quoting 2 min before resolution (safer)
 
     # BTC 5m market discovery
     btc_5m_series_slug: str = "btc-up-or-down-5m"

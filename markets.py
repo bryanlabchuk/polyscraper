@@ -127,9 +127,10 @@ def fetch_btc_5m_markets(config: BotConfig) -> list[BTCMarket]:
                     accepting_orders=m.get("acceptingOrders", True),
                 )
             )
-            if len(markets) >= config.max_active_markets:
+            # Fetch extra pool for strategy to sort by time-to-resolution
+            if len(markets) >= config.max_active_markets * 2:
                 break
-        if len(markets) >= config.max_active_markets:
+        if len(markets) >= config.max_active_markets * 2:
             break
 
     return markets
