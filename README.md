@@ -59,9 +59,9 @@ Edit `config.py` or set env vars:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `order_size` | 20 | Max exposure per side per market ($20) |
-| `max_position_per_market` | 20 | Max $ per 5-min market |
-| `max_total_capital` | 100 | Total capital to work with |
+| `order_size` | 14 | Max exposure per side per market (~$14) |
+| `max_position_per_market` | 14 | Max $ per 5-min market |
+| `max_total_capital` | 72 | Total capital to work with |
 | `max_active_markets` | 5 | Max markets quoted at once |
 | `spread_bps` | 50 | Spread in basis points (0.5%) |
 | `quote_refresh_seconds` | 30 | Quote refresh interval |

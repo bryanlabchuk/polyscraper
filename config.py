@@ -23,10 +23,10 @@ class BotConfig:
 
     # Market maker params
     spread_bps: int = 50  # 0.5% spread (50 basis points)
-    order_size: float = 20.0  # USDC per side ($20 max exposure per 5-min market)
-    max_position_per_market: float = 20.0  # Max exposure per 5-min market
-    max_total_capital: float = 100.0  # Total capital to work with
-    max_active_markets: int = 5  # Max markets to quote (20 * 5 = 100)
+    order_size: float = 14.0  # USDC per side (~$14 max exposure per 5-min market)
+    max_position_per_market: float = 14.0  # Max exposure per 5-min market
+    max_total_capital: float = 72.0  # Total capital to work with
+    max_active_markets: int = 5  # Max markets to quote (14 * 5 = 70, under 72)
     quote_refresh_seconds: int = 30  # How often to refresh quotes
     minutes_before_resolution_to_stop: int = 1  # Stop quoting 1 min before resolution
 

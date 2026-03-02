@@ -1,6 +1,6 @@
 # Polymarket BTC 5m Market Maker — Setup Checklist
 
-Use this checklist to get the bot running with **$100 total capital** and **$20 max per 5‑minute market**.
+Use this checklist to get the bot running with **$72 total capital** and **~$14 max per 5‑minute market**.
 
 ---
 
@@ -30,7 +30,7 @@ Use your wallet’s “Export private key” or “Reveal secret key” flow and
 
 - **Network:** Polygon
 - **Asset:** USDC.e (bridged USDC)
-- **Amount:** At least $100
+- **Amount:** At least $72
 
 Ways to get USDC.e on Polygon:
 
@@ -65,12 +65,12 @@ PRIVATE_KEY=0xYOUR_KEY_HERE
 DRY_RUN=true
 ```
 
-Optional (already set in code for $100 / $20 per market):
+Optional (already set in code for $72 / ~$14 per market):
 
 ```bash
-ORDER_SIZE=20
-MAX_POSITION_PER_MARKET=20
-MAX_TOTAL_CAPITAL=100
+ORDER_SIZE=14
+MAX_POSITION_PER_MARKET=14
+MAX_TOTAL_CAPITAL=72
 MAX_ACTIVE_MARKETS=5
 ```
 
@@ -107,10 +107,10 @@ Or simply remove `DRY_RUN` or set `DRY_RUN=false`.
 
 | Setting | Value |
 |---------|-------|
-| Total capital | $100 |
-| Max per 5‑min market | $20 |
+| Total capital | $72 |
+| Max per 5‑min market | ~$14 |
 | Max markets quoted | 5 |
-| Order size per side | $20 |
+| Order size per side | $14 |
 | Spread | 0.5% |
 | Quote refresh | Every 30 seconds |
 
