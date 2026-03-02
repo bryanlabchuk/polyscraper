@@ -32,33 +32,68 @@ class BTCMarket:
 def fetch_btc_5m_markets(config: BotConfig) -> list[BTCMarket]:
     """
     Fetch active BTC 5-minute Up/Down markets from Polymarket Gamma API.
-    Returns markets that are currently accepting orders.
+    Uses /series to get event slugs, then /events/slug/{slug} for full details.
     """
-    url = f"{config.gamma_host}/events"
-    params = {
-        "series_slug": config.btc_5m_series_slug,
-        "active": "true",
-        "closed": "false",
-        "limit": 20,
-    }
-
+    # 1. Get series with active event slugs
+    series_url = f"{config.gamma_host}/series"
     try:
-        resp = requests.get(url, params=params, timeout=10)
-        resp.raise_for_status()
-        events = resp.json()
+        series_resp = requests.get(
+            series_url,
+            params={"slug": config.btc_5m_series_slug, "closed": "false"},
+            timeout=10,
+            headers={"User-Agent": "PolymarketBot/1.0"},
+        )
+        series_resp.raise_for_status()
+        series_data = series_resp.json()
     except requests.RequestException as e:
-        logger.error("Failed to fetch events: %s", e)
+        logger.error("Failed to fetch series: %s", e)
         return []
 
+    if not series_data:
+        return []
+
+    events_brief = [
+        e
+        for e in series_data[0].get("events", [])
+        if e.get("active") and not e.get("closed")
+    ]
+    # Sort by slug (timestamp) descending to get upcoming/current first
+    events_brief.sort(key=lambda x: x.get("slug", ""), reverse=True)
+
     markets: list[BTCMarket] = []
-    for event in events:
-        slug = event.get("slug", "")
+    seen_conditions = set()
+
+    # 2. Fetch full event details for the next few (current/upcoming windows)
+    for event_brief in events_brief[: min(10, config.max_active_markets * 2)]:
+        slug = event_brief.get("slug", "")
         if not slug.startswith(config.btc_5m_slug_prefix):
             continue
+
+        try:
+            event_resp = requests.get(
+                f"{config.gamma_host}/events/slug/{slug}",
+                timeout=10,
+                headers={"User-Agent": "PolymarketBot/1.0"},
+            )
+            event_resp.raise_for_status()
+            event_list = event_resp.json()
+        except requests.RequestException as e:
+            logger.debug("Failed to fetch event %s: %s", slug[:30], e)
+            continue
+
+        if not event_list:
+            continue
+
+        event = event_list[0] if isinstance(event_list, list) else event_list
 
         for m in event.get("markets", []):
             if not m.get("enableOrderBook") or not m.get("acceptingOrders", True):
                 continue
+
+            cond_id = m.get("conditionId")
+            if cond_id in seen_conditions:
+                continue
+            seen_conditions.add(cond_id)
 
             clob_ids = m.get("clobTokenIds")
             if not clob_ids:
@@ -80,9 +115,9 @@ def fetch_btc_5m_markets(config: BotConfig) -> list[BTCMarket]:
             markets.append(
                 BTCMarket(
                     event_id=event["id"],
-                    event_slug=slug,
+                    event_slug=event.get("slug", ""),
                     title=event.get("title", m.get("question", "")),
-                    condition_id=m["conditionId"],
+                    condition_id=cond_id,
                     up_token_id=str(token_ids[up_idx]),
                     down_token_id=str(token_ids[down_idx]),
                     tick_size=str(m.get("orderPriceMinTickSize", "0.001")),
@@ -92,5 +127,9 @@ def fetch_btc_5m_markets(config: BotConfig) -> list[BTCMarket]:
                     accepting_orders=m.get("acceptingOrders", True),
                 )
             )
+            if len(markets) >= config.max_active_markets:
+                break
+        if len(markets) >= config.max_active_markets:
+            break
 
     return markets
