@@ -30,6 +30,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Reduce httpx/HTTP noise (400 on api-key is expected before derive)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 _shutdown = False
 
 
@@ -60,6 +63,18 @@ def main():
 
     signal.signal(signal.SIGINT, _on_signal)
     signal.signal(signal.SIGTERM, _on_signal)
+
+    # Log wallet and links for viewing transactions
+    try:
+        from client import create_client
+        _c = create_client(config, read_only=True)
+        if _c and config.private_key:
+            addr = _c.get_address()
+            if addr:
+                logger.info("Wallet: %s", addr)
+                logger.info("View transactions: https://polygonscan.com/address/%s", addr)
+    except Exception:
+        pass
 
     logger.info("Starting BTC 5m market maker (refresh every %ds)", config.quote_refresh_seconds)
 

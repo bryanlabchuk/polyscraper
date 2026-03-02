@@ -83,6 +83,15 @@ See [SETUP_CHECKLIST.md](SETUP_CHECKLIST.md) for the full setup flow.
 └── README.md
 ```
 
+## Viewing Transactions & Activity
+
+- **Polygonscan**: After the bot starts, it logs your wallet address and a Polygonscan link. Use it to see all on-chain activity (USDC transfers, CTF mints/redeems, etc.):  
+  `https://polygonscan.com/address/YOUR_ADDRESS`
+
+- **Activity script**: Run `python show_activity.py` to fetch recent trades from the CLOB API and print wallet links, Polygonscan URL, and a summary of recent fills.
+
+- **Polymarket UI**: Connect the same wallet at [polymarket.com/portfolio](https://polymarket.com/portfolio) to see positions and activity in their UI.
+
 ## Risk & Fees
 
 - **Crypto markets have taker fees** (1% as of 2026). Makers may have rebates; check [Polymarket Fees](https://docs.polymarket.com/trading/fees).
