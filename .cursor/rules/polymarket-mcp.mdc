@@ -1,0 +1,19 @@
+---
+description: Use Polymarket MCP for API docs and best practices
+globs: "**/*.py"
+alwaysApply: false
+---
+
+# Polymarket Integration
+
+When working on Polymarket API integration, trading logic, or market making:
+
+1. **Use the Polymarket MCP** — Call `SearchPolymarketDocumentation` to find current API references, code examples, and best practices. The MCP indexes docs.polymarket.com.
+
+2. **Key doc areas** — Search for: "market maker trading", "create order", "GTD expiration", "fee rate", "tick size", "cancel orders".
+
+3. **Best practices from docs**:
+   - Use GTD (Good-Till-Date) for event markets to auto-expire before resolution
+   - Prefer `post_orders()` batch over individual `create_and_post_order()` calls
+   - Fetch tick size from CLOB before quoting
+   - Cancel stale quotes before posting new ones

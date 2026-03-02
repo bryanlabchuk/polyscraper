@@ -1,0 +1,102 @@
+# Polymarket BTC 5-Minute Market Maker Bot
+
+A market maker bot for Polymarket's 5-minute Bitcoin Up/Down prediction markets. Posts two-sided quotes (bid/ask) around the midpoint to earn the spread.
+
+## How It Works
+
+- **Markets**: Polymarket runs recurring 5-minute markets: "Will Bitcoin go Up or Down in the next 5 minutes?" (resolved via Chainlink BTC/USD)
+- **Strategy**: Quote both sides around the current midpoint with a configurable spread
+- **Cycle**: Refresh quotes every 30 seconds (configurable); stop quoting 1 minute before resolution
+
+## Requirements
+
+- **Python 3.9.10+** (py-clob-client requires 3.9.10)
+
+## Setup
+
+### 1. Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 2. Environment Variables
+
+Copy `.env.example` to `.env` and configure:
+
+```bash
+cp .env.example .env
+```
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `PRIVATE_KEY` | Yes* | Your wallet's private key (EOA) |
+| `FUNDER` | No | For Magic/email wallets; your funded address |
+| `SIGNATURE_TYPE` | No | `0` = EOA (default), `1` = Magic/email |
+| `DRY_RUN` | No | `true` to skip placing real orders |
+
+\* Not required if `DRY_RUN=true`
+
+### 3. Wallet & Approvals
+
+- **Private key**: See [SETUP_CHECKLIST.md](SETUP_CHECKLIST.md) for how to get your private key (MetaMask export, etc.).
+- **USDC.e on Polygon**: You need USDC.e to trade. Bridge from Ethereum or buy on Polygon.
+- **Token Approvals**: EOA/MetaMask users must approve USDC and CTF tokens. See [Polymarket Token Allowances](https://github.com/Polymarket/py-clob-client#important-token-allowances-for-metamaskeoa-users).
+
+### 4. Run
+
+```bash
+# Dry run first (no real orders)
+DRY_RUN=true python main.py
+
+# Live trading
+python main.py
+```
+
+## Configuration
+
+Edit `config.py` or set env vars:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `order_size` | 20 | Max exposure per side per market ($20) |
+| `max_position_per_market` | 20 | Max $ per 5-min market |
+| `max_total_capital` | 100 | Total capital to work with |
+| `max_active_markets` | 5 | Max markets quoted at once |
+| `spread_bps` | 50 | Spread in basis points (0.5%) |
+| `quote_refresh_seconds` | 30 | Quote refresh interval |
+| `minutes_before_resolution_to_stop` | 1 | Stop quoting N min before resolution |
+
+See [SETUP_CHECKLIST.md](SETUP_CHECKLIST.md) for the full setup flow.
+
+## Project Structure
+
+```
+.
+├── main.py           # Entry point, runs the bot loop
+├── config.py         # Configuration from env
+├── markets.py        # Fetch BTC 5m markets from Gamma API
+├── client.py         # Polymarket CLOB client wrapper
+├── strategy.py       # Market making logic
+├── SETUP_CHECKLIST.md # Step-by-step setup (incl. private key)
+├── requirements.txt
+└── README.md
+```
+
+## Risk & Fees
+
+- **Crypto markets have taker fees** (1% as of 2026). Makers may have rebates; check [Polymarket Fees](https://docs.polymarket.com/trading/fees).
+- **5-minute markets are volatile**. Use appropriate position limits.
+- **Start with DRY_RUN** and small sizes when going live.
+
+## Polymarket MCP
+
+This project includes a Cursor rule (`.cursor/rules/polymarket-mcp.mdc`) that prompts the AI to use the **Polymarket MCP** when working on Polymarket code. The MCP provides `SearchPolymarketDocumentation` to query docs.polymarket.com for current API references and best practices.
+
+Ensure the Polymarket MCP is enabled in Cursor (Settings → MCP → Polymarket Documentation).
+
+## References
+
+- [Polymarket CLOB API](https://docs.polymarket.com/developers/CLOB)
+- [Market Maker Setup](https://docs.polymarket.com/developers/market-makers/setup)
+- [py-clob-client](https://github.com/Polymarket/py-clob-client)
