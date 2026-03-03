@@ -64,12 +64,12 @@ Edit `config.py` or set env vars:
 | `max_total_capital` | 72 | Total capital to work with |
 | `max_active_markets` | 5 | Max markets quoted at once |
 | `spread_bps` | 40 | Spread in basis points (0.4%; tighter = more fills) |
-| `quote_refresh_seconds` | 25 | Quote refresh interval (faster = more competitive) |
+| `quote_refresh_seconds` | 0 | Base seconds between cycles (0 = near rate limit) |
 | `minutes_before_resolution_to_stop` | 2 | Stop quoting N min before resolution (safer) |
 | `anti_snipe_jitter` | true | Enable spread/size/timing jitter (harder to snipe) |
 | `spread_jitter_pct` | 15 | Max ±% random on spread |
 | `size_jitter_pct` | 10 | Max ±% random on order size |
-| `cycle_jitter_seconds` | 6 | Add 0–6s random to each cycle interval |
+| `cycle_jitter_seconds` | 2 | Add 0–2s random to each cycle interval |
 
 See [SETUP_CHECKLIST.md](SETUP_CHECKLIST.md) for the full setup flow.
 

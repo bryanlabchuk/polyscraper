@@ -77,7 +77,8 @@ def main():
     except Exception:
         pass
 
-    logger.info("Starting BTC 5m market maker (refresh every %ds)", config.quote_refresh_seconds)
+    logger.info("Starting BTC 5m market maker (cycle: %ds base + 0-%ds jitter)",
+               config.quote_refresh_seconds, config.cycle_jitter_seconds)
 
     while not _shutdown:
         try:

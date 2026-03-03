@@ -27,7 +27,7 @@ class BotConfig:
     max_position_per_market: float = 14.0  # Max exposure per 5-min market
     max_total_capital: float = 72.0  # Total capital to work with
     max_active_markets: int = 5  # Max markets to quote (14 * 5 = 70, under 72)
-    quote_refresh_seconds: int = 25  # How often to refresh quotes (faster = more competitive)
+    quote_refresh_seconds: int = 0  # Base seconds between cycles (0 = run immediately, near rate limit)
     minutes_before_resolution_to_stop: int = 2  # Stop quoting 2 min before resolution (safer)
 
     # BTC 5m market discovery
@@ -41,11 +41,11 @@ class BotConfig:
     anti_snipe_jitter: bool = True  # Enable spread, size, timing jitter
     spread_jitter_pct: int = 15  # Max ±% random on spread (e.g. 15 = ±15%)
     size_jitter_pct: int = 10  # Max ±% random on order size
-    cancel_post_delay_min: float = 0.3  # Min seconds between cancel and post
-    cancel_post_delay_max: float = 1.2  # Max seconds between cancel and post
-    market_stagger_min: float = 0.4  # Min seconds between posting to different markets
-    market_stagger_max: float = 1.8  # Max seconds between posting to different markets
-    cycle_jitter_seconds: int = 6  # Add 0 to N seconds random to each cycle interval
+    cancel_post_delay_min: float = 0.05  # Min seconds between cancel and post (aggressive)
+    cancel_post_delay_max: float = 0.25  # Max seconds between cancel and post
+    market_stagger_min: float = 0.05  # Min seconds between posting to different markets
+    market_stagger_max: float = 0.35  # Max seconds between posting to different markets
+    cycle_jitter_seconds: int = 2  # Add 0 to N seconds random to each cycle (keeps some unpredictability)
 
     def __post_init__(self):
         self.private_key = os.getenv("PRIVATE_KEY", "").strip()
