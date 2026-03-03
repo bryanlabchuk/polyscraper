@@ -15,6 +15,7 @@ Use DRY_RUN=true to test without placing real orders.
 """
 
 import logging
+import random
 import signal
 import sys
 import time
@@ -87,7 +88,11 @@ def main():
         if _shutdown:
             break
 
-        for _ in range(config.quote_refresh_seconds):
+        # Base interval + random jitter (anti-snipe: unpredictable cycle timing)
+        base_sleep = config.quote_refresh_seconds
+        jitter = random.randint(0, config.cycle_jitter_seconds) if config.anti_snipe_jitter else 0
+        total_sleep = base_sleep + jitter
+        for _ in range(total_sleep):
             if _shutdown:
                 break
             time.sleep(1)

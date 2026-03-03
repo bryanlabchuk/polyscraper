@@ -37,6 +37,16 @@ class BotConfig:
     # Safety
     dry_run: bool = False
 
+    # Anti-snipe / anti-predictability (makes strategy harder to exploit)
+    anti_snipe_jitter: bool = True  # Enable spread, size, timing jitter
+    spread_jitter_pct: int = 15  # Max ±% random on spread (e.g. 15 = ±15%)
+    size_jitter_pct: int = 10  # Max ±% random on order size
+    cancel_post_delay_min: float = 0.3  # Min seconds between cancel and post
+    cancel_post_delay_max: float = 1.2  # Max seconds between cancel and post
+    market_stagger_min: float = 0.4  # Min seconds between posting to different markets
+    market_stagger_max: float = 1.8  # Max seconds between posting to different markets
+    cycle_jitter_seconds: int = 6  # Add 0 to N seconds random to each cycle interval
+
     def __post_init__(self):
         self.private_key = os.getenv("PRIVATE_KEY", "").strip()
         self.funder = os.getenv("FUNDER", "").strip()
@@ -51,3 +61,11 @@ class BotConfig:
         self.minutes_before_resolution_to_stop = int(
             os.getenv("MINUTES_BEFORE_RESOLUTION_TO_STOP", str(self.minutes_before_resolution_to_stop))
         )
+        self.anti_snipe_jitter = os.getenv("ANTI_SNIPE_JITTER", "true").lower() in ("true", "1", "yes")
+        self.spread_jitter_pct = int(os.getenv("SPREAD_JITTER_PCT", str(self.spread_jitter_pct)))
+        self.size_jitter_pct = int(os.getenv("SIZE_JITTER_PCT", str(self.size_jitter_pct)))
+        self.cancel_post_delay_min = float(os.getenv("CANCEL_POST_DELAY_MIN", str(self.cancel_post_delay_min)))
+        self.cancel_post_delay_max = float(os.getenv("CANCEL_POST_DELAY_MAX", str(self.cancel_post_delay_max)))
+        self.market_stagger_min = float(os.getenv("MARKET_STAGGER_MIN", str(self.market_stagger_min)))
+        self.market_stagger_max = float(os.getenv("MARKET_STAGGER_MAX", str(self.market_stagger_max)))
+        self.cycle_jitter_seconds = int(os.getenv("CYCLE_JITTER_SECONDS", str(self.cycle_jitter_seconds)))
