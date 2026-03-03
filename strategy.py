@@ -217,7 +217,8 @@ def run_single_market_quote(
         size *= get_resolution_size_mult(mins_left, config)
     if seeking_signal and seeking_signal.size_mult != 1.0:
         size *= seeking_signal.size_mult
-    per_market_cap = config.max_total_capital / max(1, config.max_active_markets)
+    main_capital = config.max_total_capital - getattr(config, "aggressive_capital", 0)
+    per_market_cap = main_capital / max(1, config.max_active_markets)
     size = max(market.min_size, min(size, config.max_position_per_market, per_market_cap))
 
     ok = post_two_sided_quotes(client, market, bid, ask, size, config)
@@ -391,8 +392,9 @@ def run_market_making_cycle(config: BotConfig) -> None:
         # Seeking: scale size by pipeline signal
         if seeking_signal and seeking_signal.size_mult != 1.0:
             size *= seeking_signal.size_mult
-        # Cap by per-market limit and capital budget (max_total / num markets)
-        per_market_cap = config.max_total_capital / max(1, config.max_active_markets)
+        # Cap by per-market limit and capital budget (reserve aggressive_capital)
+        main_capital = config.max_total_capital - getattr(config, "aggressive_capital", 0)
+        per_market_cap = main_capital / max(1, config.max_active_markets)
         size = max(market.min_size, min(size, config.max_position_per_market, per_market_cap))
 
         ok = post_two_sided_quotes(client, market, bid, ask, size, config)

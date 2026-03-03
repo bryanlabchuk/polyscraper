@@ -75,15 +75,18 @@ def try_arb_completion(
     ask_down = get_best_ask(client, market.down_token_id)
     if ask_up is None or ask_down is None:
         return False
-    size = config.arb_completion_size or 3
+    # Aggressive: use relaxed threshold (8c) and larger size when aggressive_capital > 0
+    agg_cap = getattr(config, "aggressive_capital", 0)
+    ask_threshold = getattr(config, "aggressive_arb_completion_ask_max", 0.06) if agg_cap > 0 else 0.06
+    size = getattr(config, "aggressive_arb_completion_size", config.arb_completion_size) if agg_cap > 0 else (config.arb_completion_size or 3)
     if pos_up > 1 and pos_down <= 0:
-        if ask_down < 0.06:
+        if ask_down < ask_threshold:
             ok = post_bid_only(client, market, market.down_token_id, ask_down, size, config)
             if ok:
                 logger.info("Arb completion: buying Down @ %.3f (had Up), %ds left", ask_down, sec_left)
             return ok
     if pos_down > 1 and pos_up <= 0:
-        if ask_up < 0.06:
+        if ask_up < ask_threshold:
             ok = post_bid_only(client, market, market.up_token_id, ask_up, size, config)
             if ok:
                 logger.info("Arb completion: buying Up @ %.3f (had Down), %ds left", ask_up, sec_left)

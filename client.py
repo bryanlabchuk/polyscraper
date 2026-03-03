@@ -438,6 +438,7 @@ def get_arb_opportunity(
 def post_arb_bids(client: ClobClient, market: BTCMarket, config: BotConfig, mid: Optional[float] = None) -> bool:
     """
     Post arb bids: primary at arb_bid_price (4%), deep at arb_bid_price_deep (6%) when mid ~0.5.
+    Aggressive tier (uses aggressive_capital): deeper bids at aggressive_arb_bid_price (12% edge).
     If both sides fill, lock in profit.
     """
     if not config.arb_enabled:
@@ -455,6 +456,14 @@ def post_arb_bids(client: ClobClient, market: BTCMarket, config: BotConfig, mid:
         size_deep = getattr(config, "arb_size_deep", 4.0)
         post_bid_only(client, market, market.up_token_id, price_deep, size_deep, config)
         post_bid_only(client, market, market.down_token_id, price_deep, size_deep, config)
+    # Aggressive tier ($12): deeper bids for higher edge, more risky (less fill probability)
+    agg_cap = getattr(config, "aggressive_capital", 0)
+    agg_size = getattr(config, "aggressive_arb_size", 0)
+    agg_price = getattr(config, "aggressive_arb_bid_price", 0.44)
+    if mid is not None and 0.35 <= mid <= 0.65 and agg_cap > 0 and agg_size > 0:
+        post_bid_only(client, market, market.up_token_id, agg_price, agg_size, config)
+        post_bid_only(client, market, market.down_token_id, agg_price, agg_size, config)
+        logger.info("Aggressive arb bids: %.2f @ %.2f (12%% edge pool)", agg_size, agg_price)
     return ok
 
 

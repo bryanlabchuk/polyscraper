@@ -43,6 +43,11 @@ class BotConfig:
     arb_size: float = 6.0  # Smaller arb size (one-sided fill = directional risk)
     arb_bid_price_deep: float = 0.47
     arb_size_deep: float = 2.0  # Deep arb smaller
+
+    # Aggressive capital ($12): riskier but structured plays (deeper arb, bolder resolution)
+    aggressive_capital: float = 12.0  # Slice of max_total for higher-risk activity
+    aggressive_arb_bid_price: float = 0.44  # Deeper bids: 12% edge if both fill
+    aggressive_arb_size: float = 4.0  # Size for aggressive tier (capped by aggressive_capital)
     arb_taker_min_edge: float = 0.012  # 1.2% min edge for taker arb
     arb_taker_size: float = 10.0  # Taker arb size
 
@@ -51,6 +56,9 @@ class BotConfig:
     arb_exit_size: float = 5.0
     arb_completion_enabled: bool = True  # Buy cheap other side to complete arb, < 45s left
     arb_completion_size: float = 3.0
+    # Aggressive resolution (uses aggressive_capital): bolder thresholds
+    aggressive_arb_completion_ask_max: float = 0.08  # Complete arb if ask < 8c (vs 6c)
+    aggressive_arb_completion_size: float = 5.0  # Slightly larger completion size
 
     # Secondary quote level: disabled by default (was increasing adverse selection)
     secondary_level_enabled: bool = False
@@ -112,6 +120,15 @@ class BotConfig:
         self.arb_size = float(os.getenv("ARB_SIZE", str(self.arb_size)))
         self.arb_bid_price_deep = float(os.getenv("ARB_BID_PRICE_DEEP", str(self.arb_bid_price_deep)))
         self.arb_size_deep = float(os.getenv("ARB_SIZE_DEEP", str(self.arb_size_deep)))
+        self.aggressive_capital = float(os.getenv("AGGRESSIVE_CAPITAL", str(self.aggressive_capital)))
+        self.aggressive_arb_bid_price = float(os.getenv("AGGRESSIVE_ARB_BID_PRICE", str(self.aggressive_arb_bid_price)))
+        self.aggressive_arb_size = float(os.getenv("AGGRESSIVE_ARB_SIZE", str(self.aggressive_arb_size)))
+        self.aggressive_arb_completion_ask_max = float(
+            os.getenv("AGGRESSIVE_ARB_COMPLETION_ASK_MAX", str(self.aggressive_arb_completion_ask_max))
+        )
+        self.aggressive_arb_completion_size = float(
+            os.getenv("AGGRESSIVE_ARB_COMPLETION_SIZE", str(self.aggressive_arb_completion_size))
+        )
         self.arb_taker_min_edge = float(os.getenv("ARB_TAKER_MIN_EDGE", str(self.arb_taker_min_edge)))
         self.arb_taker_size = float(os.getenv("ARB_TAKER_SIZE", str(self.arb_taker_size)))
         self.arb_exit_enabled = os.getenv("ARB_EXIT_ENABLED", "true").lower() in ("true", "1", "yes")
