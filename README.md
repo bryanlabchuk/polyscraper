@@ -82,6 +82,34 @@ Edit `config.py` or set env vars:
 
 See [SETUP_CHECKLIST.md](SETUP_CHECKLIST.md) for the full setup flow.
 
+## Seeking: External Data Pipelines
+
+The bot can connect to external data sources for analysis-driven signals. Set `SEEKING_PIPELINE_URL` (HTTP API) and/or `SEEKING_PIPELINE_FILE` (local JSON). If both are set, HTTP is tried first.
+
+**Signal format (JSON):**
+```json
+{
+  "skew_bps": 10,
+  "spread_extra_bps": 5,
+  "pause": false,
+  "size_mult": 1.0,
+  "confidence": 0.8
+}
+```
+
+- `skew_bps`: positive = bullish (skew Up), negative = bearish
+- `spread_extra_bps`: add to spread when uncertain
+- `pause`: if true, skip quoting this market
+- `size_mult`: multiply order size (0.5–2.0)
+
+**HTTP API**: POST `market_slug`, `condition_id`, `mid`, `minutes_to_resolution` as JSON body.
+
+**File**: Write a `signals.json` that your analysis pipeline updates. Use per-market keys or a `default` object.
+
+## Fill Logging
+
+Trades are appended to `fills_log.csv` for analysis. Columns: `trade_id`, `timestamp`, `side`, `price`, `size`, `market_slug`, `condition_id`. Use this to understand which side you're getting filled on and tune strategy.
+
 ## Project Structure
 
 ```
@@ -91,7 +119,11 @@ See [SETUP_CHECKLIST.md](SETUP_CHECKLIST.md) for the full setup flow.
 ├── markets.py        # Fetch BTC 5m markets from Gamma API
 ├── client.py         # Polymarket CLOB client wrapper
 ├── strategy.py       # Market making logic
-├── SETUP_CHECKLIST.md # Step-by-step setup (incl. private key)
+├── seeking.py        # External data pipeline connector
+├── fill_logger.py    # Log trades to fills_log.csv
+├── fills_log.csv     # Trade log (gitignored)
+├── signals.json      # Optional: file-based seeking (gitignored)
+├── SETUP_CHECKLIST.md
 ├── requirements.txt
 └── README.md
 ```

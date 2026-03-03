@@ -21,14 +21,14 @@ class BotConfig:
     funder: str = ""
     signature_type: int = 0  # 0=EOA, 1=Magic/email
 
-    # Market maker params ($150 USDC.e preset)
-    spread_bps: int = 36  # Tighter spread for more fills; volatility filter widens when needed
-    order_size: float = 21.0  # USDC per side (7 × $21 ≈ $147)
-    max_position_per_market: float = 21.0  # Max exposure per 5-min market
+    # Market maker params ($150 USDC.e preset - conservative to reduce adverse selection)
+    spread_bps: int = 42  # Wider spread = fewer fills but less adverse selection
+    order_size: float = 20.0  # USDC per side (5 × $20 = $100 active)
+    max_position_per_market: float = 20.0  # Max exposure per 5-min market
     max_total_capital: float = 150.0  # Total capital
-    max_active_markets: int = 7  # More diversification (7 × $21)
-    quote_refresh_seconds: int = 0  # Base seconds between cycles (0 = run immediately, near rate limit)
-    minutes_before_resolution_to_stop: int = 2  # Stop quoting 2 min before resolution (safer)
+    max_active_markets: int = 5  # Fewer markets = better liquidity per market
+    quote_refresh_seconds: int = 0  # Base seconds between cycles
+    minutes_before_resolution_to_stop: int = 4  # Stop 4 min before resolution (high adverse selection)
 
     # BTC 5m market discovery
     btc_5m_series_slug: str = "btc-up-or-down-5m"
@@ -38,16 +38,16 @@ class BotConfig:
     dry_run: bool = False
 
     # Arb / lock-in profit: buy both Up and Down at low prices for guaranteed payout
-    arb_enabled: bool = True  # Post arb bids + take arb when book allows
+    arb_enabled: bool = True
     arb_bid_price: float = 0.48  # Primary arb (4% profit when both fill)
-    arb_size: float = 10.0  # Primary arb size
-    arb_bid_price_deep: float = 0.47  # Deep arb (6% profit); smaller size
-    arb_size_deep: float = 4.0  # Deep arb size
+    arb_size: float = 6.0  # Smaller arb size (one-sided fill = directional risk)
+    arb_bid_price_deep: float = 0.47
+    arb_size_deep: float = 2.0  # Deep arb smaller
     arb_taker_min_edge: float = 0.012  # 1.2% min edge for taker arb
     arb_taker_size: float = 10.0  # Taker arb size
 
-    # Secondary quote level: wider spread, smaller size (more fill opportunities)
-    secondary_level_enabled: bool = True
+    # Secondary quote level: disabled by default (was increasing adverse selection)
+    secondary_level_enabled: bool = False
     secondary_spread_mult: float = 1.5  # 1.5× main spread
     secondary_size_mult: float = 0.4  # 40% of main size
 
@@ -70,7 +70,18 @@ class BotConfig:
     cancel_post_delay_max: float = 0.25  # Max seconds between cancel and post
     market_stagger_min: float = 0.05  # Min seconds between posting to different markets
     market_stagger_max: float = 0.35  # Max seconds between posting to different markets
-    cycle_jitter_seconds: int = 2  # Add 0 to N seconds random to each cycle (keeps some unpredictability)
+    cycle_jitter_seconds: int = 2
+
+    # Seeking: connect to external data pipelines for analysis-driven signals
+    seeking_enabled: bool = True
+    seeking_pipeline_url: str = ""  # e.g. http://localhost:8000/signal
+    seeking_pipeline_file: str = ""  # e.g. ./signals.json (written by your analysis)
+    seeking_pipeline_method: str = "POST"  # GET or POST
+    seeking_timeout: float = 2.0
+    seeking_cache_ttl: int = 30  # seconds
+
+    # Fill logging: append trades to fills_log.csv for analysis
+    fill_logging_enabled: bool = True
 
     def __post_init__(self):
         self.private_key = os.getenv("PRIVATE_KEY", "").strip()
@@ -115,3 +126,10 @@ class BotConfig:
         self.market_stagger_min = float(os.getenv("MARKET_STAGGER_MIN", str(self.market_stagger_min)))
         self.market_stagger_max = float(os.getenv("MARKET_STAGGER_MAX", str(self.market_stagger_max)))
         self.cycle_jitter_seconds = int(os.getenv("CYCLE_JITTER_SECONDS", str(self.cycle_jitter_seconds)))
+        self.seeking_enabled = os.getenv("SEEKING_ENABLED", "true").lower() in ("true", "1", "yes")
+        self.seeking_pipeline_url = os.getenv("SEEKING_PIPELINE_URL", self.seeking_pipeline_url).strip()
+        self.seeking_pipeline_file = os.getenv("SEEKING_PIPELINE_FILE", self.seeking_pipeline_file).strip()
+        self.seeking_pipeline_method = os.getenv("SEEKING_PIPELINE_METHOD", self.seeking_pipeline_method).upper() or "POST"
+        self.seeking_timeout = float(os.getenv("SEEKING_TIMEOUT", str(self.seeking_timeout)))
+        self.seeking_cache_ttl = int(os.getenv("SEEKING_CACHE_TTL", str(self.seeking_cache_ttl)))
+        self.fill_logging_enabled = os.getenv("FILL_LOGGING_ENABLED", "true").lower() in ("true", "1", "yes")

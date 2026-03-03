@@ -23,6 +23,8 @@ from client import (
 )
 
 from config import BotConfig
+from seeking import fetch_signal, SeekingSignal
+from fill_logger import log_fills
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +84,7 @@ def compute_quotes(
     config: BotConfig,
     condition_id: str = "",
     imbalance: Optional[float] = None,
+    seeking_signal: Optional[SeekingSignal] = None,
 ) -> tuple[float, float]:
     """
     Compute bid and ask prices around midpoint.
@@ -91,11 +94,17 @@ def compute_quotes(
     With volatility: adds extra spread when mid has been moving.
     imbalance: bid_vol/(bid_vol+ask_vol); if provided, skews mid toward imbalance.
     """
+    # Seeking pipeline skew (external data: e.g. bullish -> skew up)
+    if seeking_signal and seeking_signal.skew_bps != 0:
+        mid = seeking_signal.apply_skew(mid)
     # Book imbalance skew
     if imbalance is not None:
         mid = mid + _imbalance_skew(imbalance, config)
         mid = max(0.01, min(0.99, mid))
     half_spread = (spread_bps / 10000) / 2
+    # Seeking pipeline: add extra spread (e.g. when external signal is uncertain)
+    if seeking_signal and seeking_signal.spread_extra_bps > 0:
+        half_spread += (seeking_signal.spread_extra_bps / 10000) / 2
     # Volatility: widen when midpoint has been moving a lot
     if condition_id:
         extra = _volatility_extra_bps(condition_id, mid, config)
@@ -154,6 +163,13 @@ def run_market_making_cycle(config: BotConfig) -> None:
     if not client:
         logger.error("No client available")
         return
+
+    # Log new fills to fills_log.csv for analysis
+    if config.fill_logging_enabled:
+        try:
+            log_fills(client)
+        except Exception:
+            pass
 
     markets = fetch_btc_5m_markets(config)
     if not markets:
@@ -223,9 +239,28 @@ def run_market_making_cycle(config: BotConfig) -> None:
         if config.min_book_depth > 0 and depth is not None and depth < config.min_book_depth:
             continue
 
+        # Seeking: fetch signal from external data pipelines (optional)
+        seeking_signal: Optional[SeekingSignal] = None
+        if config.seeking_enabled and (config.seeking_pipeline_url or config.seeking_pipeline_file):
+            mins_left = _minutes_to_resolution(market)
+            seeking_signal = fetch_signal(
+                market_slug=market.event_slug,
+                condition_id=market.condition_id,
+                mid=mid,
+                minutes_to_resolution=mins_left,
+                pipeline_url=config.seeking_pipeline_url or None,
+                pipeline_file=config.seeking_pipeline_file or None,
+                pipeline_method=config.seeking_pipeline_method,
+                timeout=config.seeking_timeout,
+                use_cache=True,
+                cache_ttl=config.seeking_cache_ttl,
+            )
+            if seeking_signal.pause:
+                continue
+
         imbalance = book_summary.get("imbalance") if book_summary else None
         bid, ask = compute_quotes(
-            mid, config.spread_bps, market.tick_size, config, market.condition_id, imbalance
+            mid, config.spread_bps, market.tick_size, config, market.condition_id, imbalance, seeking_signal
         )
         if bid >= ask:
             continue
@@ -245,6 +280,9 @@ def run_market_making_cycle(config: BotConfig) -> None:
                 size *= 0.6  # 60% size when < 3 min
             elif mins_left < 4:
                 size *= 0.8  # 80% size when 3–4 min
+        # Seeking: scale size by pipeline signal
+        if seeking_signal and seeking_signal.size_mult != 1.0:
+            size *= seeking_signal.size_mult
         # Cap by per-market limit and capital budget (max_total / num markets)
         per_market_cap = config.max_total_capital / max(1, config.max_active_markets)
         size = max(market.min_size, min(size, config.max_position_per_market, per_market_cap))

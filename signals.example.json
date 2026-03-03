@@ -1,0 +1,9 @@
+{
+  "default": {
+    "skew_bps": 0,
+    "spread_extra_bps": 0,
+    "pause": false,
+    "size_mult": 1.0,
+    "confidence": 1.0
+  }
+}

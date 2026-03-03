@@ -6,3 +6,5 @@ __pycache__/
 venv/
 *.log
 dashboard_data.json
+fills_log.csv
+signals.json
