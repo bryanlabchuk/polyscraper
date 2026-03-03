@@ -141,6 +141,102 @@ def _minutes_to_resolution(market: BTCMarket) -> float:
         return 0
 
 
+def run_single_market_quote(
+    client,
+    market: BTCMarket,
+    mid: float,
+    book_summary: dict,
+    config: BotConfig,
+    books_cache: Optional[dict] = None,
+) -> bool:
+    """
+    Update quotes for a single market (used by WS event-driven flow).
+    Call when book or price_change indicates a real price move.
+    Returns True if quotes were posted.
+    """
+    global _market_fail_cooldown
+    now = time.time()
+    if market.condition_id in _market_fail_cooldown:
+        return False
+    if not should_quote_market(market, config):
+        return False
+    if not fee_rate_available(client, market.up_token_id):
+        _market_fail_cooldown[market.condition_id] = now + COOLDOWN_SECONDS
+        return False
+
+    cancel_market_orders(client, market.condition_id, config)
+    if config.anti_snipe_jitter and config.cancel_post_delay_max > 0:
+        delay = random.uniform(config.cancel_post_delay_min, config.cancel_post_delay_max)
+        time.sleep(delay)
+
+    mins_left = _minutes_to_resolution(market)
+    record_mid(market.condition_id, mid)
+    threshold = config.trailing_mid_threshold_bps / 10000
+    last = _last_quoted_mid.get(market.condition_id, mid)
+    if abs(mid - last) < threshold:
+        mid = last
+    else:
+        _last_quoted_mid[market.condition_id] = mid
+
+    depth = book_summary.get("depth") or 0
+    if config.min_book_depth > 0 and depth < config.min_book_depth:
+        return False
+
+    seeking_signal = None
+    if config.seeking_enabled and (config.seeking_pipeline_url or config.seeking_pipeline_file):
+        seeking_signal = fetch_signal(
+            market_slug=market.event_slug,
+            condition_id=market.condition_id,
+            mid=mid,
+            minutes_to_resolution=mins_left,
+            pipeline_url=config.seeking_pipeline_url or None,
+            pipeline_file=config.seeking_pipeline_file or None,
+            pipeline_method=config.seeking_pipeline_method,
+            timeout=config.seeking_timeout,
+            use_cache=True,
+            cache_ttl=config.seeking_cache_ttl,
+        )
+        if seeking_signal and seeking_signal.pause:
+            return False
+
+    imbalance = book_summary.get("imbalance")
+    tick = float(market.tick_size)
+    min_spread_bps = max(config.spread_bps, int(tick * 13000))
+    bid, ask = compute_quotes(
+        mid, min_spread_bps, market.tick_size, config, market.condition_id, imbalance, seeking_signal, mins_left
+    )
+    if bid >= ask:
+        return False
+
+    size = config.order_size
+    if config.anti_snipe_jitter and config.size_jitter_pct > 0:
+        size = _jitter(size, config.size_jitter_pct, True)
+    if depth > 0 and config.depth_scale_threshold > 0:
+        size *= min(1.0, depth / config.depth_scale_threshold)
+    if config.size_scale_near_resolution:
+        size *= get_resolution_size_mult(mins_left, config)
+    if seeking_signal and seeking_signal.size_mult != 1.0:
+        size *= seeking_signal.size_mult
+    per_market_cap = config.max_total_capital / max(1, config.max_active_markets)
+    size = max(market.min_size, min(size, config.max_position_per_market, per_market_cap))
+
+    ok = post_two_sided_quotes(client, market, bid, ask, size, config)
+    if ok and config.secondary_level_enabled:
+        post_secondary_quotes(client, market, mid, config.spread_bps, size, config)
+    if not ok:
+        _market_fail_cooldown[market.condition_id] = now + COOLDOWN_SECONDS
+        return False
+
+    if config.arb_enabled:
+        cache = books_cache or {market.up_token_id: book_summary}
+        opp, ask_up, ask_down, _ = get_arb_opportunity(client, market, config.arb_taker_min_edge, cache)
+        if opp and ask_up is not None and ask_down is not None:
+            execute_arb_taker(client, market, ask_up, ask_down, min(config.arb_taker_size, size * 0.5), config)
+        if 0.35 <= mid <= 0.65:
+            post_arb_bids(client, market, config, mid=mid)
+    return True
+
+
 def should_quote_market(market: BTCMarket, config: BotConfig) -> bool:
     """
     Decide if we should quote this market.
