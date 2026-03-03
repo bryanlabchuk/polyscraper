@@ -3,12 +3,14 @@
 import logging
 import random
 import time
+from collections import deque
 from datetime import datetime, timezone
 
 from markets import BTCMarket, fetch_btc_5m_markets
 from client import (
     create_client,
     get_midpoint,
+    get_book_depth,
     post_two_sided_quotes,
     cancel_market_orders,
     fee_rate_available,
@@ -23,6 +25,9 @@ logger = logging.getLogger(__name__)
 
 # Cooldown for markets that fail (e.g. fee-rate 404). condition_id -> retry_after_ts
 _market_fail_cooldown: dict[str, float] = {}
+# Midpoint history per market for volatility detection. condition_id -> deque of (ts, mid)
+_midpoint_history: dict[str, deque] = {}
+MID_HISTORY_LEN = 5
 COOLDOWN_SECONDS = 300  # 5 min
 
 
@@ -34,19 +39,48 @@ def _jitter(value: float, pct: int, enabled: bool) -> float:
     return value * mult
 
 
+def _volatility_extra_bps(condition_id: str, mid: float, config: BotConfig) -> int:
+    """Return extra bps to add to spread when recent midpoint volatility is high."""
+    if config.volatility_spread_extra_bps <= 0:
+        return 0
+    if condition_id not in _midpoint_history:
+        _midpoint_history[condition_id] = deque(maxlen=MID_HISTORY_LEN)
+    q = _midpoint_history[condition_id]
+    now = time.time()
+    q.append((now, mid))
+    # Prune entries older than ~2 minutes
+    while q and now - q[0][0] > 120:
+        q.popleft()
+    if len(q) < 3:
+        return 0
+    mids = [m for _, m in q]
+    r = max(mids) - min(mids)
+    # If midpoint moved > 1.5% in last 2 min, add extra spread
+    if r > 0.015:
+        return config.volatility_spread_extra_bps
+    return 0
+
+
 def compute_quotes(
     mid: float,
     spread_bps: int,
     tick_size: str,
     config: BotConfig,
+    condition_id: str = "",
 ) -> tuple[float, float]:
     """
     Compute bid and ask prices around midpoint.
     spread_bps: spread in basis points (e.g. 40 = 0.4%)
     Widens slightly near extremes (0.1, 0.9) to reduce adverse selection risk.
     With anti_snipe_jitter: adds random spread/skew to reduce predictability.
+    With volatility: adds extra spread when mid has been moving.
     """
     half_spread = (spread_bps / 10000) / 2
+    # Volatility: widen when midpoint has been moving a lot
+    if condition_id:
+        extra = _volatility_extra_bps(condition_id, mid, config)
+        if extra > 0:
+            half_spread += (extra / 10000) / 2
     # Near extremes, add 0.5% to each side for safety
     if mid < 0.15 or mid > 0.85:
         half_spread += 0.005
@@ -151,7 +185,15 @@ def run_market_making_cycle(config: BotConfig) -> None:
         if mid is None:
             continue
 
-        bid, ask = compute_quotes(mid, config.spread_bps, market.tick_size, config)
+        # Thin book: skip markets with very low liquidity (high adverse selection risk)
+        if config.min_book_depth > 0:
+            depth = get_book_depth(client, market.up_token_id)
+            if depth is not None and depth < config.min_book_depth:
+                continue
+
+        bid, ask = compute_quotes(
+            mid, config.spread_bps, market.tick_size, config, market.condition_id
+        )
         if bid >= ask:
             continue
 
@@ -159,7 +201,14 @@ def run_market_making_cycle(config: BotConfig) -> None:
         size = config.order_size
         if config.anti_snipe_jitter and config.size_jitter_pct > 0:
             size = _jitter(size, config.size_jitter_pct, True)
-            size = max(market.min_size, min(size, config.max_position_per_market))
+        # Reduce size near resolution (less exposure when outcome is imminent)
+        if config.size_scale_near_resolution:
+            mins_left = _minutes_to_resolution(market)
+            if mins_left < 3:
+                size *= 0.6  # 60% size when < 3 min
+            elif mins_left < 4:
+                size *= 0.8  # 80% size when 3–4 min
+        size = max(market.min_size, min(size, config.max_position_per_market))
 
         ok = post_two_sided_quotes(
             client, market, bid, ask, size, config

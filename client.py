@@ -192,6 +192,24 @@ def cancel_market_orders(client: ClobClient, condition_id: str, config: BotConfi
         return False
 
 
+def get_book_depth(client: ClobClient, token_id: str) -> Optional[float]:
+    """Total size at best bid + best ask (USDC notional). None if unavailable."""
+    try:
+        book = client.get_order_book(token_id)
+        if not book or (not book.bids and not book.asks):
+            return None
+        total = 0.0
+        if book.bids:
+            best_bid = max(book.bids, key=lambda b: float(b.price))
+            total += float(best_bid.price or 0) * float(best_bid.size or 0)
+        if book.asks:
+            best_ask = min(book.asks, key=lambda a: float(a.price))
+            total += float(best_ask.price or 0) * float(best_ask.size or 0)
+        return total
+    except Exception:
+        return None
+
+
 def get_best_ask(client: ClobClient, token_id: str) -> Optional[float]:
     """Get best (lowest) ask price from order book."""
     try:

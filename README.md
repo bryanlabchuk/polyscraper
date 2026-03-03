@@ -70,6 +70,9 @@ Edit `config.py` or set env vars:
 | `arb_bid_price` | 0.48 | Bid on both sides (0.48+0.48=0.96 cost, $1 payout) |
 | `arb_size` | 5 | Size per arb bid ($) |
 | `arb_taker_min_edge` | 0.015 | Min edge (1.5%) to execute taker arb |
+| `volatility_spread_extra_bps` | 20 | Extra bps when mid moves >1.5% in 2 min |
+| `min_book_depth` | 15 | Skip market if best bid+ask liquidity < $15 |
+| `size_scale_near_resolution` | true | Reduce order size when <4 min to resolution |
 | `anti_snipe_jitter` | true | Enable spread/size/timing jitter (harder to snipe) |
 | `spread_jitter_pct` | 15 | Max ±% random on spread |
 | `size_jitter_pct` | 10 | Max ±% random on order size |

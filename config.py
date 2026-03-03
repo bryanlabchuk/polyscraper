@@ -44,6 +44,11 @@ class BotConfig:
     arb_taker_min_edge: float = 0.015  # Min edge (1.5%) to execute taker arb (best_ask_up + best_ask_down < 1 - this)
     arb_taker_size: float = 5.0  # Max size for taker arb ($)
 
+    # Risk controls
+    volatility_spread_extra_bps: int = 20  # Add this many bps to spread when volatility is high
+    min_book_depth: float = 15.0  # Skip market if best bid+ask size < this (thin book = adverse selection risk)
+    size_scale_near_resolution: bool = True  # Reduce order size when < 4 min to resolution
+
     # Anti-snipe / anti-predictability (makes strategy harder to exploit)
     anti_snipe_jitter: bool = True  # Enable spread, size, timing jitter
     spread_jitter_pct: int = 15  # Max ±% random on spread (e.g. 15 = ±15%)
@@ -73,6 +78,13 @@ class BotConfig:
         self.arb_size = float(os.getenv("ARB_SIZE", str(self.arb_size)))
         self.arb_taker_min_edge = float(os.getenv("ARB_TAKER_MIN_EDGE", str(self.arb_taker_min_edge)))
         self.arb_taker_size = float(os.getenv("ARB_TAKER_SIZE", str(self.arb_taker_size)))
+        self.volatility_spread_extra_bps = int(
+            os.getenv("VOLATILITY_SPREAD_EXTRA_BPS", str(self.volatility_spread_extra_bps))
+        )
+        self.min_book_depth = float(os.getenv("MIN_BOOK_DEPTH", str(self.min_book_depth)))
+        self.size_scale_near_resolution = os.getenv(
+            "SIZE_SCALE_NEAR_RESOLUTION", "true"
+        ).lower() in ("true", "1", "yes")
         self.anti_snipe_jitter = os.getenv("ANTI_SNIPE_JITTER", "true").lower() in ("true", "1", "yes")
         self.spread_jitter_pct = int(os.getenv("SPREAD_JITTER_PCT", str(self.spread_jitter_pct)))
         self.size_jitter_pct = int(os.getenv("SIZE_JITTER_PCT", str(self.size_jitter_pct)))
