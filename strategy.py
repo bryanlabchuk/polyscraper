@@ -3,7 +3,6 @@
 import logging
 import random
 import time
-from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -25,16 +24,22 @@ from client import (
 from config import BotConfig
 from seeking import fetch_signal, SeekingSignal
 from fill_logger import log_fills
+from adaptive import (
+    record_mid,
+    get_resolution_spread_mult,
+    get_resolution_size_mult,
+    get_momentum_skew_bps,
+    get_volatility_extra_bps,
+)
+from positions import estimate_positions
+from resolution_actions import try_one_sided_arb_exit, try_arb_completion
 
 logger = logging.getLogger(__name__)
 
 # Cooldown for markets that fail (e.g. fee-rate 404). condition_id -> retry_after_ts
 _market_fail_cooldown: dict[str, float] = {}
-# Midpoint history per market for volatility detection. condition_id -> deque of (ts, mid)
-_midpoint_history: dict[str, deque] = {}
 # Trailing midpoint: don't update quotes until mid moves enough. condition_id -> last_quoted_mid
 _last_quoted_mid: dict[str, float] = {}
-MID_HISTORY_LEN = 5
 COOLDOWN_SECONDS = 300  # 5 min
 
 
@@ -44,28 +49,6 @@ def _jitter(value: float, pct: int, enabled: bool) -> float:
         return value
     mult = 1.0 + random.uniform(-pct / 100, pct / 100)
     return value * mult
-
-
-def _volatility_extra_bps(condition_id: str, mid: float, config: BotConfig) -> int:
-    """Return extra bps to add to spread when recent midpoint volatility is high."""
-    if config.volatility_spread_extra_bps <= 0:
-        return 0
-    if condition_id not in _midpoint_history:
-        _midpoint_history[condition_id] = deque(maxlen=MID_HISTORY_LEN)
-    q = _midpoint_history[condition_id]
-    now = time.time()
-    q.append((now, mid))
-    # Prune entries older than ~2 minutes
-    while q and now - q[0][0] > 120:
-        q.popleft()
-    if len(q) < 3:
-        return 0
-    mids = [m for _, m in q]
-    r = max(mids) - min(mids)
-    # If midpoint moved > 1.5% in last 2 min, add extra spread
-    if r > 0.015:
-        return config.volatility_spread_extra_bps
-    return 0
 
 
 def _imbalance_skew(imbalance: float, config: BotConfig) -> float:
@@ -85,6 +68,7 @@ def compute_quotes(
     condition_id: str = "",
     imbalance: Optional[float] = None,
     seeking_signal: Optional[SeekingSignal] = None,
+    minutes_left: Optional[float] = None,
 ) -> tuple[float, float]:
     """
     Compute bid and ask prices around midpoint.
@@ -93,21 +77,32 @@ def compute_quotes(
     With anti_snipe_jitter: adds random spread/skew to reduce predictability.
     With volatility: adds extra spread when mid has been moving.
     imbalance: bid_vol/(bid_vol+ask_vol); if provided, skews mid toward imbalance.
+    minutes_left: for resolution-aware spread widening.
     """
-    # Seeking pipeline skew (external data: e.g. bullish -> skew up)
+    # Seeking pipeline skew
     if seeking_signal and seeking_signal.skew_bps != 0:
         mid = seeking_signal.apply_skew(mid)
     # Book imbalance skew
     if imbalance is not None:
         mid = mid + _imbalance_skew(imbalance, config)
         mid = max(0.01, min(0.99, mid))
+    # Momentum skew: toward recent price direction (adaptive)
+    if condition_id and getattr(config, "adaptive_momentum_skew", True):
+        mom = get_momentum_skew_bps(condition_id, mid, config)
+        if mom != 0:
+            mid = mid + mom / 10000
+            mid = max(0.01, min(0.99, mid))
     half_spread = (spread_bps / 10000) / 2
-    # Seeking pipeline: add extra spread (e.g. when external signal is uncertain)
+    # Resolution: widen spread in last minutes (adaptive)
+    if minutes_left is not None and getattr(config, "resolution_spread_widen", True):
+        mult = get_resolution_spread_mult(minutes_left, config)
+        half_spread *= mult
+    # Seeking pipeline: add extra spread
     if seeking_signal and seeking_signal.spread_extra_bps > 0:
         half_spread += (seeking_signal.spread_extra_bps / 10000) / 2
-    # Volatility: widen when midpoint has been moving a lot
+    # Volatility: adaptive scaling from mid range
     if condition_id:
-        extra = _volatility_extra_bps(condition_id, mid, config)
+        extra = get_volatility_extra_bps(condition_id, mid, config)
         if extra > 0:
             half_spread += (extra / 10000) / 2
     # Near extremes, add 0.5% to each side for safety
@@ -124,6 +119,15 @@ def compute_quotes(
     bid = max(0.01, mid - bid_half)
     ask = min(0.99, mid + ask_half)
     return bid, ask
+
+
+def _seconds_to_resolution(market: BTCMarket) -> float:
+    """Seconds until market resolution."""
+    try:
+        end = datetime.fromisoformat(market.end_date.replace("Z", "+00:00"))
+        return (end - datetime.now(timezone.utc)).total_seconds()
+    except Exception:
+        return 999
 
 
 def _minutes_to_resolution(market: BTCMarket) -> float:
@@ -176,13 +180,9 @@ def run_market_making_cycle(config: BotConfig) -> None:
         logger.info("No active BTC 5m markets found")
         return
 
-    # Sort by time to resolution descending (most time first = less resolution risk)
-    markets = sorted(
-        markets,
-        key=lambda m: _minutes_to_resolution(m),
-        reverse=True,
-    )
-    markets = markets[: config.max_active_markets]
+    # Sort by time to resolution descending (most time first)
+    all_markets = sorted(markets, key=lambda m: _minutes_to_resolution(m), reverse=True)
+    markets = all_markets[: config.max_active_markets]
 
     # Prune expired cooldowns
     now = time.time()
@@ -226,6 +226,9 @@ def run_market_making_cycle(config: BotConfig) -> None:
         if mid is None:
             continue
 
+        mins_left = _minutes_to_resolution(market)
+        record_mid(market.condition_id, mid)
+
         # Trailing midpoint: don't chase small moves (reduces churn and adverse selection)
         threshold = config.trailing_mid_threshold_bps / 10000
         last = _last_quoted_mid.get(market.condition_id, mid)
@@ -260,7 +263,7 @@ def run_market_making_cycle(config: BotConfig) -> None:
 
         imbalance = book_summary.get("imbalance") if book_summary else None
         bid, ask = compute_quotes(
-            mid, config.spread_bps, market.tick_size, config, market.condition_id, imbalance, seeking_signal
+            mid, config.spread_bps, market.tick_size, config, market.condition_id, imbalance, seeking_signal, mins_left
         )
         if bid >= ask:
             continue
@@ -269,17 +272,13 @@ def run_market_making_cycle(config: BotConfig) -> None:
         size = config.order_size
         if config.anti_snipe_jitter and config.size_jitter_pct > 0:
             size = _jitter(size, config.size_jitter_pct, True)
-        # Depth-scaled size: use less when book is thin (avoid moving market)
+        # Depth-scaled size
         if depth is not None and config.depth_scale_threshold > 0:
             scale = min(1.0, depth / config.depth_scale_threshold)
             size *= scale
-        # Reduce size near resolution (less exposure when outcome is imminent)
+        # Granular resolution size scaling (5,4,3,2,1 min thresholds)
         if config.size_scale_near_resolution:
-            mins_left = _minutes_to_resolution(market)
-            if mins_left < 3:
-                size *= 0.6  # 60% size when < 3 min
-            elif mins_left < 4:
-                size *= 0.8  # 80% size when 3–4 min
+            size *= get_resolution_size_mult(mins_left, config)
         # Seeking: scale size by pipeline signal
         if seeking_signal and seeking_signal.size_mult != 1.0:
             size *= seeking_signal.size_mult
@@ -309,7 +308,27 @@ def run_market_making_cycle(config: BotConfig) -> None:
             if 0.35 <= mid <= 0.65:
                 post_arb_bids(client, market, config, mid=mid)
 
-        # Anti-snipe: stagger posting to different markets (don't blast all at once)
+        # Anti-snipe: stagger posting to different markets
         if config.anti_snipe_jitter and i < len(markets) - 1:
             stagger = random.uniform(config.market_stagger_min, config.market_stagger_max)
             time.sleep(stagger)
+
+    # Resolution pass: one-sided arb exit, arb completion (5–90 sec to resolution)
+    try:
+        resolution_markets = [
+            m for m in all_markets
+            if 5 < _seconds_to_resolution(m) < 90
+        ]
+        if resolution_markets:
+            positions = estimate_positions(client, resolution_markets)
+            for m in resolution_markets:
+                pos = positions.get(m.condition_id, (0, 0))
+                if pos[0] == 0 and pos[1] == 0:
+                    continue
+                mid = get_midpoint(client, m.up_token_id)
+                if mid is None:
+                    continue
+                try_one_sided_arb_exit(client, m, pos[0], pos[1], mid, config)
+                try_arb_completion(client, m, pos[0], pos[1], config)
+    except Exception as e:
+        logger.debug("Resolution pass: %s", e)

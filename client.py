@@ -286,12 +286,57 @@ def get_best_ask(client: ClobClient, token_id: str) -> Optional[float]:
         book = client.get_order_book(token_id)
         if not book or not book.asks or len(book.asks) == 0:
             return None
-        # Asks are typically sorted ascending by price; first is best
         best = min(book.asks, key=lambda a: float(a.price))
         return float(best.price)
     except Exception as e:
         logger.debug("Failed to get best ask for %s: %s", token_id[:20], e)
         return None
+
+
+def get_best_bid(client: ClobClient, token_id: str) -> Optional[float]:
+    """Get best (highest) bid price from order book."""
+    try:
+        book = client.get_order_book(token_id)
+        if not book or not book.bids or len(book.bids) == 0:
+            return None
+        best = max(book.bids, key=lambda b: float(b.price))
+        return float(best.price)
+    except Exception as e:
+        logger.debug("Failed to get best bid for %s: %s", token_id[:20], e)
+        return None
+
+
+def post_sell_order(
+    client: ClobClient,
+    market: BTCMarket,
+    token_id: str,
+    price: float,
+    size: float,
+    config: BotConfig,
+) -> bool:
+    """Post a sell (ask) order - used for one-sided arb exit."""
+    if config.dry_run:
+        logger.info("[DRY RUN] Would sell %.3f size %.0f on token %s", price, size, token_id[:20])
+        return True
+    tick = get_tick_size(client, token_id) or market.tick_size
+    price = round_to_tick(price, tick)
+    size = max(size, market.min_size)
+    buffer_sec = config.minutes_before_resolution_to_stop * 60
+    exp_ts = _market_expiration_ts(market, buffer_sec)
+    use_gtd = exp_ts is not None and exp_ts > int(datetime.now(timezone.utc).timestamp())
+    try:
+        opts = PartialCreateOrderOptions(neg_risk=True)
+        ask_kw = dict(token_id=token_id, side=SELL, price=price, size=size)
+        if use_gtd:
+            ask_kw["expiration"] = exp_ts
+        order = client.create_order(OrderArgs(**ask_kw), opts)
+        resp = client.post_order(order, orderType=OrderType.GTD if use_gtd else OrderType.GTC)
+        if resp and (isinstance(resp, list) or resp.get("orderID") or resp.get("success")):
+            return True
+        return False
+    except Exception as e:
+        logger.debug("Failed to post sell order: %s", e)
+        return False
 
 
 def post_bid_only(

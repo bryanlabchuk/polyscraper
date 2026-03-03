@@ -46,10 +46,20 @@ class BotConfig:
     arb_taker_min_edge: float = 0.012  # 1.2% min edge for taker arb
     arb_taker_size: float = 10.0  # Taker arb size
 
+    # Resolution-phase actions (low risk)
+    arb_exit_enabled: bool = True  # Sell one-sided loser when clearly losing, < 60s left
+    arb_exit_size: float = 5.0
+    arb_completion_enabled: bool = True  # Buy cheap other side to complete arb, < 45s left
+    arb_completion_size: float = 3.0
+
     # Secondary quote level: disabled by default (was increasing adverse selection)
     secondary_level_enabled: bool = False
     secondary_spread_mult: float = 1.5  # 1.5× main spread
     secondary_size_mult: float = 0.4  # 40% of main size
+
+    # Adaptive algorithms
+    adaptive_momentum_skew: bool = True  # Skew toward recent price direction
+    resolution_spread_widen: bool = True  # Widen spread in last minutes
 
     # Order-book-based pricing
     use_book_mid: bool = True  # Use (best_bid+best_ask)/2 when valid
@@ -104,9 +114,15 @@ class BotConfig:
         self.arb_size_deep = float(os.getenv("ARB_SIZE_DEEP", str(self.arb_size_deep)))
         self.arb_taker_min_edge = float(os.getenv("ARB_TAKER_MIN_EDGE", str(self.arb_taker_min_edge)))
         self.arb_taker_size = float(os.getenv("ARB_TAKER_SIZE", str(self.arb_taker_size)))
+        self.arb_exit_enabled = os.getenv("ARB_EXIT_ENABLED", "true").lower() in ("true", "1", "yes")
+        self.arb_exit_size = float(os.getenv("ARB_EXIT_SIZE", str(self.arb_exit_size)))
+        self.arb_completion_enabled = os.getenv("ARB_COMPLETION_ENABLED", "true").lower() in ("true", "1", "yes")
+        self.arb_completion_size = float(os.getenv("ARB_COMPLETION_SIZE", str(self.arb_completion_size)))
         self.secondary_level_enabled = os.getenv("SECONDARY_LEVEL_ENABLED", "true").lower() in ("true", "1", "yes")
         self.secondary_spread_mult = float(os.getenv("SECONDARY_SPREAD_MULT", str(self.secondary_spread_mult)))
         self.secondary_size_mult = float(os.getenv("SECONDARY_SIZE_MULT", str(self.secondary_size_mult)))
+        self.adaptive_momentum_skew = os.getenv("ADAPTIVE_MOMENTUM_SKEW", "true").lower() in ("true", "1", "yes")
+        self.resolution_spread_widen = os.getenv("RESOLUTION_SPREAD_WIDEN", "true").lower() in ("true", "1", "yes")
         self.use_book_mid = os.getenv("USE_BOOK_MID", "true").lower() in ("true", "1", "yes")
         self.imbalance_skew_bps = int(os.getenv("IMBALANCE_SKEW_BPS", str(self.imbalance_skew_bps)))
         self.trailing_mid_threshold_bps = int(os.getenv("TRAILING_MID_THRESHOLD_BPS", str(self.trailing_mid_threshold_bps)))

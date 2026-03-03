@@ -106,6 +106,15 @@ The bot can connect to external data sources for analysis-driven signals. Set `S
 
 **File**: Write a `signals.json` that your analysis pipeline updates. Use per-market keys or a `default` object.
 
+## Adaptive Algorithms
+
+- **Resolution spread widening**: Spread widens 2x in last minute, 2.5x in last 15 sec to reduce adverse selection.
+- **Granular size scaling**: 5/4/3/2/1 min thresholds (100% → 95% → 85% → 70% → 50% → 25%).
+- **Momentum skew**: Skews quotes toward recent price direction (±15 bps).
+- **Volatility scaling**: Extra spread scales continuously with mid range (0.5–2%).
+- **One-sided arb exit**: With 5–60 sec left, sell a losing one-sided position at best bid to cut losses.
+- **Arb completion**: With 5–45 sec left, buy the cheap other side (<0.06) to complete a partial arb.
+
 ## Fill Logging
 
 Trades are appended to `fills_log.csv` for analysis. Columns: `trade_id`, `timestamp`, `side`, `price`, `size`, `market_slug`, `condition_id`. Use this to understand which side you're getting filled on and tune strategy.
@@ -120,6 +129,9 @@ Trades are appended to `fills_log.csv` for analysis. Columns: `trade_id`, `times
 ├── client.py         # Polymarket CLOB client wrapper
 ├── strategy.py       # Market making logic
 ├── seeking.py        # External data pipeline connector
+├── adaptive.py       # Resolution spread/size, momentum, volatility
+├── positions.py      # Estimate positions from trades
+├── resolution_actions.py  # One-sided arb exit, arb completion
 ├── fill_logger.py    # Log trades to fills_log.csv
 ├── fills_log.csv     # Trade log (gitignored)
 ├── signals.json      # Optional: file-based seeking (gitignored)
