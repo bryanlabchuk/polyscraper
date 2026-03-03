@@ -2,6 +2,8 @@
 
 A market maker bot for Polymarket's 5-minute Bitcoin Up/Down prediction markets. Posts two-sided quotes (bid/ask) around the midpoint to earn the spread.
 
+**Preset:** Default config targets **$150 USDC.e** — 6 markets × $25 each, larger arb, stricter risk controls.
+
 ## How It Works
 
 - **Markets**: Polymarket runs recurring 5-minute markets: "Will Bitcoin go Up or Down in the next 5 minutes?" (resolved via Chainlink BTC/USD)
@@ -59,19 +61,19 @@ Edit `config.py` or set env vars:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `order_size` | 14 | Max exposure per side per market (~$14) |
-| `max_position_per_market` | 14 | Max $ per 5-min market |
-| `max_total_capital` | 72 | Total capital to work with |
-| `max_active_markets` | 5 | Max markets quoted at once |
-| `spread_bps` | 40 | Spread in basis points (0.4%; tighter = more fills) |
+| `order_size` | 25 | Max exposure per side per market (~$25) |
+| `max_position_per_market` | 25 | Max $ per 5-min market |
+| `max_total_capital` | 150 | Total capital (6 × $25) |
+| `max_active_markets` | 6 | Markets to quote (diversification) |
+| `spread_bps` | 38 | Spread in basis points |
 | `quote_refresh_seconds` | 0 | Base seconds between cycles (0 = near rate limit) |
 | `minutes_before_resolution_to_stop` | 2 | Stop quoting N min before resolution (safer) |
 | `arb_enabled` | true | Enable arb: lock-in profit by buying both Up+Down when cheap |
 | `arb_bid_price` | 0.48 | Bid on both sides (0.48+0.48=0.96 cost, $1 payout) |
-| `arb_size` | 5 | Size per arb bid ($) |
-| `arb_taker_min_edge` | 0.015 | Min edge (1.5%) to execute taker arb |
-| `volatility_spread_extra_bps` | 20 | Extra bps when mid moves >1.5% in 2 min |
-| `min_book_depth` | 15 | Skip market if best bid+ask liquidity < $15 |
+| `arb_size` | 10 | Size per arb bid ($) |
+| `arb_taker_min_edge` | 0.012 | Min edge (1.2%) to execute taker arb |
+| `volatility_spread_extra_bps` | 25 | Extra bps when mid moves >1.5% in 2 min |
+| `min_book_depth` | 25 | Skip market if best bid+ask liquidity < $25 |
 | `size_scale_near_resolution` | true | Reduce order size when <4 min to resolution |
 | `anti_snipe_jitter` | true | Enable spread/size/timing jitter (harder to snipe) |
 | `spread_jitter_pct` | 15 | Max ±% random on spread |

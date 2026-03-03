@@ -21,12 +21,12 @@ class BotConfig:
     funder: str = ""
     signature_type: int = 0  # 0=EOA, 1=Magic/email
 
-    # Market maker params
-    spread_bps: int = 40  # 0.4% spread (40 bps) - tighter = more fills, wider = less adverse selection
-    order_size: float = 14.0  # USDC per side (~$14 max exposure per 5-min market)
-    max_position_per_market: float = 14.0  # Max exposure per 5-min market
-    max_total_capital: float = 72.0  # Total capital to work with (5 × $14)
-    max_active_markets: int = 5  # Max markets to quote (14 * 5 = 70, under 72)
+    # Market maker params ($150 USDC.e preset)
+    spread_bps: int = 36  # Tighter spread for more fills; volatility filter widens when needed
+    order_size: float = 21.0  # USDC per side (7 × $21 ≈ $147)
+    max_position_per_market: float = 21.0  # Max exposure per 5-min market
+    max_total_capital: float = 150.0  # Total capital
+    max_active_markets: int = 7  # More diversification (7 × $21)
     quote_refresh_seconds: int = 0  # Base seconds between cycles (0 = run immediately, near rate limit)
     minutes_before_resolution_to_stop: int = 2  # Stop quoting 2 min before resolution (safer)
 
@@ -39,14 +39,27 @@ class BotConfig:
 
     # Arb / lock-in profit: buy both Up and Down at low prices for guaranteed payout
     arb_enabled: bool = True  # Post arb bids + take arb when book allows
-    arb_bid_price: float = 0.48  # Bid this on both sides (0.48+0.48=0.96 cost, $1 payout = 4% profit)
-    arb_size: float = 5.0  # Size per arb order ($)
-    arb_taker_min_edge: float = 0.015  # Min edge (1.5%) to execute taker arb (best_ask_up + best_ask_down < 1 - this)
-    arb_taker_size: float = 5.0  # Max size for taker arb ($)
+    arb_bid_price: float = 0.48  # Primary arb (4% profit when both fill)
+    arb_size: float = 10.0  # Primary arb size
+    arb_bid_price_deep: float = 0.47  # Deep arb (6% profit); smaller size
+    arb_size_deep: float = 4.0  # Deep arb size
+    arb_taker_min_edge: float = 0.012  # 1.2% min edge for taker arb
+    arb_taker_size: float = 10.0  # Taker arb size
 
-    # Risk controls
-    volatility_spread_extra_bps: int = 20  # Add this many bps to spread when volatility is high
-    min_book_depth: float = 15.0  # Skip market if best bid+ask size < this (thin book = adverse selection risk)
+    # Secondary quote level: wider spread, smaller size (more fill opportunities)
+    secondary_level_enabled: bool = True
+    secondary_spread_mult: float = 1.5  # 1.5× main spread
+    secondary_size_mult: float = 0.4  # 40% of main size
+
+    # Order-book-based pricing
+    use_book_mid: bool = True  # Use (best_bid+best_ask)/2 when valid
+    imbalance_skew_bps: int = 20  # Max skew from book imbalance (e.g. 20 = ±0.2%)
+    trailing_mid_threshold_bps: int = 30  # Don't update quotes until mid moves 0.3%
+    depth_scale_threshold: float = 40.0  # Scale size down when book depth < this
+
+    # Risk controls (stricter with larger size)
+    volatility_spread_extra_bps: int = 25  # Widen more when volatile
+    min_book_depth: float = 25.0  # Require deeper books for larger orders
     size_scale_near_resolution: bool = True  # Reduce order size when < 4 min to resolution
 
     # Anti-snipe / anti-predictability (makes strategy harder to exploit)
@@ -76,8 +89,17 @@ class BotConfig:
         self.arb_enabled = os.getenv("ARB_ENABLED", "true").lower() in ("true", "1", "yes")
         self.arb_bid_price = float(os.getenv("ARB_BID_PRICE", str(self.arb_bid_price)))
         self.arb_size = float(os.getenv("ARB_SIZE", str(self.arb_size)))
+        self.arb_bid_price_deep = float(os.getenv("ARB_BID_PRICE_DEEP", str(self.arb_bid_price_deep)))
+        self.arb_size_deep = float(os.getenv("ARB_SIZE_DEEP", str(self.arb_size_deep)))
         self.arb_taker_min_edge = float(os.getenv("ARB_TAKER_MIN_EDGE", str(self.arb_taker_min_edge)))
         self.arb_taker_size = float(os.getenv("ARB_TAKER_SIZE", str(self.arb_taker_size)))
+        self.secondary_level_enabled = os.getenv("SECONDARY_LEVEL_ENABLED", "true").lower() in ("true", "1", "yes")
+        self.secondary_spread_mult = float(os.getenv("SECONDARY_SPREAD_MULT", str(self.secondary_spread_mult)))
+        self.secondary_size_mult = float(os.getenv("SECONDARY_SIZE_MULT", str(self.secondary_size_mult)))
+        self.use_book_mid = os.getenv("USE_BOOK_MID", "true").lower() in ("true", "1", "yes")
+        self.imbalance_skew_bps = int(os.getenv("IMBALANCE_SKEW_BPS", str(self.imbalance_skew_bps)))
+        self.trailing_mid_threshold_bps = int(os.getenv("TRAILING_MID_THRESHOLD_BPS", str(self.trailing_mid_threshold_bps)))
+        self.depth_scale_threshold = float(os.getenv("DEPTH_SCALE_THRESHOLD", str(self.depth_scale_threshold)))
         self.volatility_spread_extra_bps = int(
             os.getenv("VOLATILITY_SPREAD_EXTRA_BPS", str(self.volatility_spread_extra_bps))
         )

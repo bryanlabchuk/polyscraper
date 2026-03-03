@@ -179,6 +179,27 @@ def post_two_sided_quotes(
         return False
 
 
+def post_secondary_quotes(
+    client: ClobClient,
+    market: BTCMarket,
+    mid: float,
+    spread_bps: int,
+    size: float,
+    config: BotConfig,
+) -> bool:
+    """
+    Post secondary level: wider spread (spread_mult × spread_bps), smaller size (size_mult × size).
+    More fill opportunities without over-exposing.
+    """
+    if not config.secondary_level_enabled or config.secondary_size_mult <= 0:
+        return True
+    half = (spread_bps * config.secondary_spread_mult / 10000) / 2
+    bid = max(0.01, mid - half)
+    ask = min(0.99, mid + half)
+    sec_size = size * config.secondary_size_mult
+    return post_two_sided_quotes(client, market, bid, ask, sec_size, config)
+
+
 def cancel_market_orders(client: ClobClient, condition_id: str, config: BotConfig) -> bool:
     """Cancel all orders for a given market."""
     if config.dry_run:
@@ -208,6 +229,55 @@ def get_book_depth(client: ClobClient, token_id: str) -> Optional[float]:
         return total
     except Exception:
         return None
+
+
+def get_order_book_summary(client: ClobClient, token_id: str) -> Optional[dict]:
+    """
+    Get best bid, best ask, volumes, and depth for order-book-based pricing.
+    Returns dict with: best_bid, best_ask, bid_vol, ask_vol, depth, imbalance.
+    imbalance = bid_vol / (bid_vol + ask_vol), 0.5 = balanced.
+    """
+    try:
+        book = client.get_order_book(token_id)
+        if not book or (not book.bids and not book.asks):
+            return None
+        best_bid_p, best_bid_s = 0.0, 0.0
+        best_ask_p, best_ask_s = 0.0, 0.0
+        if book.bids:
+            best_bid = max(book.bids, key=lambda b: float(b.price))
+            best_bid_p = float(best_bid.price or 0)
+            best_bid_s = float(best_bid.size or 0)
+        if book.asks:
+            best_ask = min(book.asks, key=lambda a: float(a.price))
+            best_ask_p = float(best_ask.price or 0)
+            best_ask_s = float(best_ask.size or 0)
+        depth = best_bid_p * best_bid_s + best_ask_p * best_ask_s
+        total_vol = best_bid_s + best_ask_s
+        imbalance = best_bid_s / total_vol if total_vol > 0 else 0.5
+        return {
+            "best_bid": best_bid_p,
+            "best_ask": best_ask_p,
+            "bid_vol": best_bid_s,
+            "ask_vol": best_ask_s,
+            "depth": depth,
+            "imbalance": imbalance,
+        }
+    except Exception:
+        return None
+
+
+def get_midpoint_and_book(client: ClobClient, token_id: str) -> tuple[Optional[float], Optional[dict]]:
+    """
+    Get midpoint and order book summary in one flow.
+    Uses (best_bid + best_ask)/2 when book is valid (best_bid < best_ask); else API midpoint.
+    Returns (mid, book_summary). book_summary has: best_bid, best_ask, depth, imbalance.
+    """
+    s = get_order_book_summary(client, token_id)
+    if s and s["best_bid"] > 0 and s["best_ask"] > 0 and s["best_bid"] < s["best_ask"]:
+        mid = (s["best_bid"] + s["best_ask"]) / 2
+        return mid, s
+    mid = get_midpoint(client, token_id)
+    return mid, s
 
 
 def get_best_ask(client: ClobClient, token_id: str) -> Optional[float]:
@@ -275,15 +345,27 @@ def get_arb_opportunity(
     return combined < threshold, ask_up, ask_down, combined
 
 
-def post_arb_bids(client: ClobClient, market: BTCMarket, config: BotConfig) -> bool:
-    """Post arb bids: bid arb_bid_price on both Up and Down. If both fill, lock in profit."""
-    if not config.arb_enabled or config.arb_size <= 0:
+def post_arb_bids(client: ClobClient, market: BTCMarket, config: BotConfig, mid: Optional[float] = None) -> bool:
+    """
+    Post arb bids: primary at arb_bid_price (4%), deep at arb_bid_price_deep (6%) when mid ~0.5.
+    If both sides fill, lock in profit.
+    """
+    if not config.arb_enabled:
         return False
-    price = config.arb_bid_price
-    size = config.arb_size
-    ok1 = post_bid_only(client, market, market.up_token_id, price, size, config)
-    ok2 = post_bid_only(client, market, market.down_token_id, price, size, config)
-    return ok1 and ok2
+    ok = True
+    if config.arb_size > 0:
+        price = config.arb_bid_price
+        size = config.arb_size
+        ok1 = post_bid_only(client, market, market.up_token_id, price, size, config)
+        ok2 = post_bid_only(client, market, market.down_token_id, price, size, config)
+        ok = ok1 and ok2
+    # Deep arb (0.47): 6% profit when both fill; only when mid in range
+    if mid is not None and 0.35 <= mid <= 0.65 and config.arb_size_deep > 0:
+        price_deep = getattr(config, "arb_bid_price_deep", 0.47)
+        size_deep = getattr(config, "arb_size_deep", 4.0)
+        post_bid_only(client, market, market.up_token_id, price_deep, size_deep, config)
+        post_bid_only(client, market, market.down_token_id, price_deep, size_deep, config)
+    return ok
 
 
 def execute_arb_taker(

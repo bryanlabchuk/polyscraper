@@ -5,13 +5,16 @@ import random
 import time
 from collections import deque
 from datetime import datetime, timezone
+from typing import Optional
 
 from markets import BTCMarket, fetch_btc_5m_markets
 from client import (
     create_client,
     get_midpoint,
+    get_midpoint_and_book,
     get_book_depth,
     post_two_sided_quotes,
+    post_secondary_quotes,
     cancel_market_orders,
     fee_rate_available,
     get_arb_opportunity,
@@ -27,6 +30,8 @@ logger = logging.getLogger(__name__)
 _market_fail_cooldown: dict[str, float] = {}
 # Midpoint history per market for volatility detection. condition_id -> deque of (ts, mid)
 _midpoint_history: dict[str, deque] = {}
+# Trailing midpoint: don't update quotes until mid moves enough. condition_id -> last_quoted_mid
+_last_quoted_mid: dict[str, float] = {}
 MID_HISTORY_LEN = 5
 COOLDOWN_SECONDS = 300  # 5 min
 
@@ -61,12 +66,22 @@ def _volatility_extra_bps(condition_id: str, mid: float, config: BotConfig) -> i
     return 0
 
 
+def _imbalance_skew(imbalance: float, config: BotConfig) -> float:
+    """Skew mid by book imbalance: bid-heavy -> skew up, ask-heavy -> skew down."""
+    if config.imbalance_skew_bps <= 0:
+        return 0.0
+    # imbalance > 0.5 = more bids than asks -> price may drift up
+    skew = (imbalance - 0.5) * (config.imbalance_skew_bps / 10000) * 2  # ±imbalance_skew_bps
+    return skew
+
+
 def compute_quotes(
     mid: float,
     spread_bps: int,
     tick_size: str,
     config: BotConfig,
     condition_id: str = "",
+    imbalance: Optional[float] = None,
 ) -> tuple[float, float]:
     """
     Compute bid and ask prices around midpoint.
@@ -74,7 +89,12 @@ def compute_quotes(
     Widens slightly near extremes (0.1, 0.9) to reduce adverse selection risk.
     With anti_snipe_jitter: adds random spread/skew to reduce predictability.
     With volatility: adds extra spread when mid has been moving.
+    imbalance: bid_vol/(bid_vol+ask_vol); if provided, skews mid toward imbalance.
     """
+    # Book imbalance skew
+    if imbalance is not None:
+        mid = mid + _imbalance_skew(imbalance, config)
+        mid = max(0.01, min(0.99, mid))
     half_spread = (spread_bps / 10000) / 2
     # Volatility: widen when midpoint has been moving a lot
     if condition_id:
@@ -181,18 +201,31 @@ def run_market_making_cycle(config: BotConfig) -> None:
             delay = random.uniform(config.cancel_post_delay_min, config.cancel_post_delay_max)
             time.sleep(delay)
 
-        mid = get_midpoint(client, market.up_token_id)
+        # Midpoint: use book-based when valid, else API
+        book_summary = None
+        if config.use_book_mid:
+            mid, book_summary = get_midpoint_and_book(client, market.up_token_id)
+        else:
+            mid = get_midpoint(client, market.up_token_id)
         if mid is None:
             continue
 
-        # Thin book: skip markets with very low liquidity (high adverse selection risk)
-        if config.min_book_depth > 0:
-            depth = get_book_depth(client, market.up_token_id)
-            if depth is not None and depth < config.min_book_depth:
-                continue
+        # Trailing midpoint: don't chase small moves (reduces churn and adverse selection)
+        threshold = config.trailing_mid_threshold_bps / 10000
+        last = _last_quoted_mid.get(market.condition_id, mid)
+        if abs(mid - last) < threshold:
+            mid = last  # Use stale mid; avoid constant reposting
+        else:
+            _last_quoted_mid[market.condition_id] = mid
 
+        # Thin book: skip markets with very low liquidity (high adverse selection risk)
+        depth = (book_summary.get("depth") if book_summary else None) or get_book_depth(client, market.up_token_id)
+        if config.min_book_depth > 0 and depth is not None and depth < config.min_book_depth:
+            continue
+
+        imbalance = book_summary.get("imbalance") if book_summary else None
         bid, ask = compute_quotes(
-            mid, config.spread_bps, market.tick_size, config, market.condition_id
+            mid, config.spread_bps, market.tick_size, config, market.condition_id, imbalance
         )
         if bid >= ask:
             continue
@@ -201,6 +234,10 @@ def run_market_making_cycle(config: BotConfig) -> None:
         size = config.order_size
         if config.anti_snipe_jitter and config.size_jitter_pct > 0:
             size = _jitter(size, config.size_jitter_pct, True)
+        # Depth-scaled size: use less when book is thin (avoid moving market)
+        if depth is not None and config.depth_scale_threshold > 0:
+            scale = min(1.0, depth / config.depth_scale_threshold)
+            size *= scale
         # Reduce size near resolution (less exposure when outcome is imminent)
         if config.size_scale_near_resolution:
             mins_left = _minutes_to_resolution(market)
@@ -208,11 +245,13 @@ def run_market_making_cycle(config: BotConfig) -> None:
                 size *= 0.6  # 60% size when < 3 min
             elif mins_left < 4:
                 size *= 0.8  # 80% size when 3–4 min
-        size = max(market.min_size, min(size, config.max_position_per_market))
+        # Cap by per-market limit and capital budget (max_total / num markets)
+        per_market_cap = config.max_total_capital / max(1, config.max_active_markets)
+        size = max(market.min_size, min(size, config.max_position_per_market, per_market_cap))
 
-        ok = post_two_sided_quotes(
-            client, market, bid, ask, size, config
-        )
+        ok = post_two_sided_quotes(client, market, bid, ask, size, config)
+        if ok and config.secondary_level_enabled:
+            post_secondary_quotes(client, market, mid, config.spread_bps, size, config)
         if not ok:
             _market_fail_cooldown[market.condition_id] = now + COOLDOWN_SECONDS
 
@@ -228,9 +267,9 @@ def run_market_making_cycle(config: BotConfig) -> None:
                     min(config.arb_taker_size, size * 0.5),
                     config,
                 )
-            # 2) Arb bids: post bid at 0.48 on both sides (when mid ~0.5, likely to fill in volatile swings)
+            # 2) Arb bids: primary 0.48 + deep 0.47 when mid ~0.5
             if 0.35 <= mid <= 0.65:
-                post_arb_bids(client, market, config)
+                post_arb_bids(client, market, config, mid=mid)
 
         # Anti-snipe: stagger posting to different markets (don't blast all at once)
         if config.anti_snipe_jitter and i < len(markets) - 1:
