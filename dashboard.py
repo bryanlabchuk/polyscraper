@@ -24,7 +24,7 @@ log.setLevel(logging.ERROR)
 
 app = Flask(__name__)
 DATA_FILE = Path(__file__).parent / "dashboard_data.json"
-POLL_INTERVAL = 2  # seconds between API polls
+POLL_INTERVAL = 30  # seconds between API polls
 PORT = 3099
 
 # In-memory cache, updated by background thread
@@ -175,7 +175,7 @@ HTML_TEMPLATE = """
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="refresh" content="2">
+  <meta http-equiv="refresh" content="30">
   <title>PMSC Bot Dashboard</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
@@ -270,7 +270,7 @@ HTML_TEMPLATE = """
     {% endif %}
   </div>
 
-  <div class="meta">Data from Polymarket CLOB API. Auto-refresh: 2s.</div>
+  <div class="meta">Data from Polymarket CLOB API. Auto-refresh: 30s.</div>
 
   {% if stats.snapshots %}
   <script>
