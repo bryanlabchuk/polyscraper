@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs, OrderType, PostOrdersArgs, PartialCreateOrderOptions
+from py_clob_client.clob_types import BookParams, OrderArgs, OrderType, PostOrdersArgs, PartialCreateOrderOptions
 from py_clob_client.order_builder.constants import BUY, SELL
 
 from config import BotConfig
@@ -236,39 +236,71 @@ def get_book_depth(client: ClobClient, token_id: str) -> Optional[float]:
         return None
 
 
+def _parse_book_to_summary(book) -> Optional[dict]:
+    """Parse OrderBookSummary to our dict format. Returns None if empty."""
+    if not book or (not book.bids and not book.asks):
+        return None
+    best_bid_p, best_bid_s = 0.0, 0.0
+    best_ask_p, best_ask_s = 0.0, 0.0
+    if book.bids:
+        best_bid = max(book.bids, key=lambda b: float(b.price))
+        best_bid_p = float(best_bid.price or 0)
+        best_bid_s = float(best_bid.size or 0)
+    if book.asks:
+        best_ask = min(book.asks, key=lambda a: float(a.price))
+        best_ask_p = float(best_ask.price or 0)
+        best_ask_s = float(best_ask.size or 0)
+    depth = best_bid_p * best_bid_s + best_ask_p * best_ask_s
+    total_vol = best_bid_s + best_ask_s
+    imbalance = best_bid_s / total_vol if total_vol > 0 else 0.5
+    return {
+        "best_bid": best_bid_p,
+        "best_ask": best_ask_p,
+        "bid_vol": best_bid_s,
+        "ask_vol": best_ask_s,
+        "depth": depth,
+        "imbalance": imbalance,
+    }
+
+
+def get_order_books_batch(client: ClobClient, token_ids: list[str]) -> dict[str, Optional[dict]]:
+    """
+    Fetch order books for multiple tokens in ONE API call.
+    Returns token_id -> book_summary (or None). Book summary has mid, depth, imbalance.
+    """
+    if not token_ids:
+        return {}
+    try:
+        params = [BookParams(token_id=t) for t in token_ids]
+        books = client.get_order_books(params)
+    except Exception as e:
+        logger.debug("Batch get_order_books failed: %s", e)
+        return {t: None for t in token_ids}
+    result = {}
+    for i, book in enumerate(books):
+        tid = token_ids[i] if i < len(token_ids) else ""
+        s = _parse_book_to_summary(book)
+        result[tid] = s
+    return result
+
+
 def get_order_book_summary(client: ClobClient, token_id: str) -> Optional[dict]:
-    """
-    Get best bid, best ask, volumes, and depth for order-book-based pricing.
-    Returns dict with: best_bid, best_ask, bid_vol, ask_vol, depth, imbalance.
-    imbalance = bid_vol / (bid_vol + ask_vol), 0.5 = balanced.
-    """
+    """Get book summary for one token (use get_order_books_batch for multiple)."""
     try:
         book = client.get_order_book(token_id)
-        if not book or (not book.bids and not book.asks):
-            return None
-        best_bid_p, best_bid_s = 0.0, 0.0
-        best_ask_p, best_ask_s = 0.0, 0.0
-        if book.bids:
-            best_bid = max(book.bids, key=lambda b: float(b.price))
-            best_bid_p = float(best_bid.price or 0)
-            best_bid_s = float(best_bid.size or 0)
-        if book.asks:
-            best_ask = min(book.asks, key=lambda a: float(a.price))
-            best_ask_p = float(best_ask.price or 0)
-            best_ask_s = float(best_ask.size or 0)
-        depth = best_bid_p * best_bid_s + best_ask_p * best_ask_s
-        total_vol = best_bid_s + best_ask_s
-        imbalance = best_bid_s / total_vol if total_vol > 0 else 0.5
-        return {
-            "best_bid": best_bid_p,
-            "best_ask": best_ask_p,
-            "bid_vol": best_bid_s,
-            "ask_vol": best_ask_s,
-            "depth": depth,
-            "imbalance": imbalance,
-        }
+        return _parse_book_to_summary(book)
     except Exception:
         return None
+
+
+def mid_from_book_summary(s: dict) -> Optional[float]:
+    """Compute midpoint from book summary if valid (best_bid < best_ask)."""
+    if not s or s.get("best_bid", 0) <= 0 or s.get("best_ask", 0) <= 0:
+        return None
+    bb, ba = s["best_bid"], s["best_ask"]
+    if bb >= ba:
+        return None
+    return (bb + ba) / 2
 
 
 def get_midpoint_and_book(client: ClobClient, token_id: str) -> tuple[Optional[float], Optional[dict]]:
@@ -381,13 +413,21 @@ def get_arb_opportunity(
     client: ClobClient,
     market: BTCMarket,
     min_edge: float = 0.015,
+    books_cache: Optional[dict] = None,
 ) -> tuple[bool, Optional[float], Optional[float], Optional[float]]:
     """
     Check if arb exists: best_ask(Up) + best_ask(Down) < (1 - min_edge).
     Returns (opportunity_exists, ask_up, ask_down, combined_cost).
+    If books_cache provided, uses cached best_ask (avoids 2 API calls).
     """
-    ask_up = get_best_ask(client, market.up_token_id)
-    ask_down = get_best_ask(client, market.down_token_id)
+    if books_cache:
+        bu = books_cache.get(market.up_token_id)
+        bd = books_cache.get(market.down_token_id)
+        ask_up = float(bu["best_ask"]) if bu and bu.get("best_ask") else None
+        ask_down = float(bd["best_ask"]) if bd and bd.get("best_ask") else None
+    else:
+        ask_up = get_best_ask(client, market.up_token_id)
+        ask_down = get_best_ask(client, market.down_token_id)
     if ask_up is None or ask_down is None:
         return False, ask_up, ask_down, None
     combined = ask_up + ask_down

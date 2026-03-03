@@ -27,7 +27,7 @@ class BotConfig:
     max_position_per_market: float = 50.0  # Max exposure per market
     max_total_capital: float = 150.0  # Total capital
     max_active_markets: int = 2  # Concentrate capital for better priority
-    quote_refresh_seconds: int = 1  # 1s refresh to chase price accurately
+    quote_refresh_seconds: int = 0  # 0 = fastest cycle (near rate limit)
     minutes_before_resolution_to_stop: int = 2  # 3x more trading time vs 4 min stop
 
     # BTC 5m market discovery
@@ -76,10 +76,10 @@ class BotConfig:
     anti_snipe_jitter: bool = True  # Enable spread, size, timing jitter
     spread_jitter_pct: int = 15  # Max ±% random on spread (e.g. 15 = ±15%)
     size_jitter_pct: int = 10  # Max ±% random on order size
-    cancel_post_delay_min: float = 0.05  # Min seconds between cancel and post (aggressive)
-    cancel_post_delay_max: float = 0.25  # Max seconds between cancel and post
-    market_stagger_min: float = 0.05  # Min seconds between posting to different markets
-    market_stagger_max: float = 0.35  # Max seconds between posting to different markets
+    cancel_post_delay_min: float = 0.0  # Speed: minimal delay
+    cancel_post_delay_max: float = 0.03  # Max 30ms between cancel and post
+    market_stagger_min: float = 0.01  # Min 10ms between markets
+    market_stagger_max: float = 0.06  # Max 60ms between markets
     cycle_jitter_seconds: int = 2
 
     # Seeking: connect to external data pipelines for analysis-driven signals

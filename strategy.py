@@ -11,6 +11,8 @@ from client import (
     create_client,
     get_midpoint,
     get_midpoint_and_book,
+    get_order_books_batch,
+    mid_from_book_summary,
     get_book_depth,
     post_two_sided_quotes,
     post_secondary_quotes,
@@ -191,7 +193,15 @@ def run_market_making_cycle(config: BotConfig) -> None:
     logger.info("Quoting %d active BTC 5m markets (max %d, $%.0f per market)",
                 len(markets), config.max_active_markets, config.max_position_per_market)
 
-    # Shuffle market order each cycle (anti-snipe: don't always quote same market first)
+    # Batch-fetch order books (1 API call for all up+down tokens)
+    token_ids = []
+    for m in markets:
+        token_ids.append(m.up_token_id)
+        token_ids.append(m.down_token_id)
+    token_ids = list(dict.fromkeys(token_ids))
+    books_cache = get_order_books_batch(client, token_ids)
+
+    # Shuffle market order each cycle (anti-snipe)
     if config.anti_snipe_jitter:
         random.shuffle(markets)
 
@@ -212,16 +222,15 @@ def run_market_making_cycle(config: BotConfig) -> None:
         # Cancel existing quotes before posting new ones
         cancel_market_orders(client, market.condition_id, config)
 
-        # Anti-snipe: random delay between cancel and post (breaks predictable timing)
+        # Minimal cancel-post delay (speed mode)
         if config.anti_snipe_jitter and config.cancel_post_delay_max > 0:
             delay = random.uniform(config.cancel_post_delay_min, config.cancel_post_delay_max)
             time.sleep(delay)
 
-        # Midpoint: use book-based when valid, else API
-        book_summary = None
-        if config.use_book_mid:
-            mid, book_summary = get_midpoint_and_book(client, market.up_token_id)
-        else:
+        # Midpoint: from batch cache (1 API call) or fallback to API
+        book_summary = books_cache.get(market.up_token_id)
+        mid = mid_from_book_summary(book_summary) if (config.use_book_mid and book_summary) else None
+        if mid is None:
             mid = get_midpoint(client, market.up_token_id)
         if mid is None:
             continue
@@ -296,11 +305,10 @@ def run_market_making_cycle(config: BotConfig) -> None:
         if not ok:
             _market_fail_cooldown[market.condition_id] = now + COOLDOWN_SECONDS
 
-        # Arb: lock-in profit opportunities
+        # Arb: lock-in profit (uses batch cache - no extra API calls)
         if config.arb_enabled and ok:
-            # 1) Taker arb: if book offers both sides for < (1 - edge), take it
             opp, ask_up, ask_down, combined = get_arb_opportunity(
-                client, market, config.arb_taker_min_edge
+                client, market, config.arb_taker_min_edge, books_cache
             )
             if opp and ask_up is not None and ask_down is not None:
                 execute_arb_taker(

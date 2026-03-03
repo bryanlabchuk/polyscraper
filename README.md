@@ -165,6 +165,13 @@ Open http://localhost:3099 for balance, trade count, volume, and a balance-over-
 - **5-minute markets are volatile**. Use appropriate position limits.
 - **Start with DRY_RUN** and small sizes when going live.
 
+## Speed Optimizations (Institutional-Level)
+
+- **Batch order book fetch**: One `get_order_books` API call for all markets (up + down tokens) instead of 2N per-cycle calls.
+- **Arb check from cache**: Taker arb uses cached books—no extra API calls.
+- **Reduced delays**: Cancel-post 0–30 ms; market stagger 10–60 ms.
+- **Fast cycle**: `quote_refresh_seconds=0` runs near rate limit.
+
 ## Polymarket MCP
 
 This project includes a Cursor rule (`.cursor/rules/polymarket-mcp.mdc`) that prompts the AI to use the **Polymarket MCP** when working on Polymarket code. The MCP provides `SearchPolymarketDocumentation` to query docs.polymarket.com for current API references and best practices.
