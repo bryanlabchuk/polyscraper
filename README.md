@@ -66,6 +66,10 @@ Edit `config.py` or set env vars:
 | `spread_bps` | 40 | Spread in basis points (0.4%; tighter = more fills) |
 | `quote_refresh_seconds` | 0 | Base seconds between cycles (0 = near rate limit) |
 | `minutes_before_resolution_to_stop` | 2 | Stop quoting N min before resolution (safer) |
+| `arb_enabled` | true | Enable arb: lock-in profit by buying both Up+Down when cheap |
+| `arb_bid_price` | 0.48 | Bid on both sides (0.48+0.48=0.96 cost, $1 payout) |
+| `arb_size` | 5 | Size per arb bid ($) |
+| `arb_taker_min_edge` | 0.015 | Min edge (1.5%) to execute taker arb |
 | `anti_snipe_jitter` | true | Enable spread/size/timing jitter (harder to snipe) |
 | `spread_jitter_pct` | 15 | Max ±% random on spread |
 | `size_jitter_pct` | 10 | Max ±% random on order size |
@@ -86,6 +90,16 @@ See [SETUP_CHECKLIST.md](SETUP_CHECKLIST.md) for the full setup flow.
 ├── requirements.txt
 └── README.md
 ```
+
+## Dashboard
+
+Run the web dashboard to monitor bot performance over time:
+
+```bash
+python dashboard.py
+```
+
+Open http://localhost:3099 for balance, trade count, volume, and a balance-over-time chart. Refreshes every 60s.
 
 ## Viewing Transactions & Activity
 

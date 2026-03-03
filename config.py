@@ -25,7 +25,7 @@ class BotConfig:
     spread_bps: int = 40  # 0.4% spread (40 bps) - tighter = more fills, wider = less adverse selection
     order_size: float = 14.0  # USDC per side (~$14 max exposure per 5-min market)
     max_position_per_market: float = 14.0  # Max exposure per 5-min market
-    max_total_capital: float = 72.0  # Total capital to work with
+    max_total_capital: float = 72.0  # Total capital to work with (5 × $14)
     max_active_markets: int = 5  # Max markets to quote (14 * 5 = 70, under 72)
     quote_refresh_seconds: int = 0  # Base seconds between cycles (0 = run immediately, near rate limit)
     minutes_before_resolution_to_stop: int = 2  # Stop quoting 2 min before resolution (safer)
@@ -36,6 +36,13 @@ class BotConfig:
 
     # Safety
     dry_run: bool = False
+
+    # Arb / lock-in profit: buy both Up and Down at low prices for guaranteed payout
+    arb_enabled: bool = True  # Post arb bids + take arb when book allows
+    arb_bid_price: float = 0.48  # Bid this on both sides (0.48+0.48=0.96 cost, $1 payout = 4% profit)
+    arb_size: float = 5.0  # Size per arb order ($)
+    arb_taker_min_edge: float = 0.015  # Min edge (1.5%) to execute taker arb (best_ask_up + best_ask_down < 1 - this)
+    arb_taker_size: float = 5.0  # Max size for taker arb ($)
 
     # Anti-snipe / anti-predictability (makes strategy harder to exploit)
     anti_snipe_jitter: bool = True  # Enable spread, size, timing jitter
@@ -61,6 +68,11 @@ class BotConfig:
         self.minutes_before_resolution_to_stop = int(
             os.getenv("MINUTES_BEFORE_RESOLUTION_TO_STOP", str(self.minutes_before_resolution_to_stop))
         )
+        self.arb_enabled = os.getenv("ARB_ENABLED", "true").lower() in ("true", "1", "yes")
+        self.arb_bid_price = float(os.getenv("ARB_BID_PRICE", str(self.arb_bid_price)))
+        self.arb_size = float(os.getenv("ARB_SIZE", str(self.arb_size)))
+        self.arb_taker_min_edge = float(os.getenv("ARB_TAKER_MIN_EDGE", str(self.arb_taker_min_edge)))
+        self.arb_taker_size = float(os.getenv("ARB_TAKER_SIZE", str(self.arb_taker_size)))
         self.anti_snipe_jitter = os.getenv("ANTI_SNIPE_JITTER", "true").lower() in ("true", "1", "yes")
         self.spread_jitter_pct = int(os.getenv("SPREAD_JITTER_PCT", str(self.spread_jitter_pct)))
         self.size_jitter_pct = int(os.getenv("SIZE_JITTER_PCT", str(self.size_jitter_pct)))

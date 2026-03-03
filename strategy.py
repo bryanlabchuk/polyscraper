@@ -12,6 +12,9 @@ from client import (
     post_two_sided_quotes,
     cancel_market_orders,
     fee_rate_available,
+    get_arb_opportunity,
+    post_arb_bids,
+    execute_arb_taker,
 )
 
 from config import BotConfig
@@ -163,6 +166,22 @@ def run_market_making_cycle(config: BotConfig) -> None:
         )
         if not ok:
             _market_fail_cooldown[market.condition_id] = now + COOLDOWN_SECONDS
+
+        # Arb: lock-in profit opportunities
+        if config.arb_enabled and ok:
+            # 1) Taker arb: if book offers both sides for < (1 - edge), take it
+            opp, ask_up, ask_down, combined = get_arb_opportunity(
+                client, market, config.arb_taker_min_edge
+            )
+            if opp and ask_up is not None and ask_down is not None:
+                execute_arb_taker(
+                    client, market, ask_up, ask_down,
+                    min(config.arb_taker_size, size * 0.5),
+                    config,
+                )
+            # 2) Arb bids: post bid at 0.48 on both sides (when mid ~0.5, likely to fill in volatile swings)
+            if 0.35 <= mid <= 0.65:
+                post_arb_bids(client, market, config)
 
         # Anti-snipe: stagger posting to different markets (don't blast all at once)
         if config.anti_snipe_jitter and i < len(markets) - 1:
