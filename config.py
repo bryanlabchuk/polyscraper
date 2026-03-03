@@ -21,14 +21,14 @@ class BotConfig:
     funder: str = ""
     signature_type: int = 0  # 0=EOA, 1=Magic/email
 
-    # Market maker params ($150 USDC.e preset - conservative to reduce adverse selection)
-    spread_bps: int = 42  # Wider spread = fewer fills but less adverse selection
-    order_size: float = 20.0  # USDC per side (5 × $20 = $100 active)
-    max_position_per_market: float = 20.0  # Max exposure per 5-min market
+    # Market maker params ($150 USDC.e - tuned for time-on-book and maker rebates)
+    spread_bps: int = 120  # 0.01 tick needs >100 bps; 120 = 0.6% each side for valid bid<ask
+    order_size: float = 50.0  # Larger size = better book priority
+    max_position_per_market: float = 50.0  # Max exposure per market
     max_total_capital: float = 150.0  # Total capital
-    max_active_markets: int = 5  # Fewer markets = better liquidity per market
-    quote_refresh_seconds: int = 0  # Base seconds between cycles
-    minutes_before_resolution_to_stop: int = 4  # Stop 4 min before resolution (high adverse selection)
+    max_active_markets: int = 2  # Concentrate capital for better priority
+    quote_refresh_seconds: int = 1  # 1s refresh to chase price accurately
+    minutes_before_resolution_to_stop: int = 2  # 3x more trading time vs 4 min stop
 
     # BTC 5m market discovery
     btc_5m_series_slug: str = "btc-up-or-down-5m"
@@ -39,7 +39,7 @@ class BotConfig:
 
     # Arb / lock-in profit: buy both Up and Down at low prices for guaranteed payout
     arb_enabled: bool = True
-    arb_bid_price: float = 0.48  # Primary arb (4% profit when both fill)
+    arb_bid_price: float = 0.485  # Tighter arb = more frequent fills (0.97 cost, $1 payout)
     arb_size: float = 6.0  # Smaller arb size (one-sided fill = directional risk)
     arb_bid_price_deep: float = 0.47
     arb_size_deep: float = 2.0  # Deep arb smaller

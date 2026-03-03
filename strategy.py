@@ -262,8 +262,12 @@ def run_market_making_cycle(config: BotConfig) -> None:
                 continue
 
         imbalance = book_summary.get("imbalance") if book_summary else None
+        tick = float(market.tick_size)
+        # Enforce min spread = 1 tick so bid/ask stay distinct after rounding
+        # 0.01 tick needs >0.006 each side (0.505 rounds to 0.50) -> 130 bps min
+        min_spread_bps = max(config.spread_bps, int(tick * 13000))
         bid, ask = compute_quotes(
-            mid, config.spread_bps, market.tick_size, config, market.condition_id, imbalance, seeking_signal, mins_left
+            mid, min_spread_bps, market.tick_size, config, market.condition_id, imbalance, seeking_signal, mins_left
         )
         if bid >= ask:
             continue

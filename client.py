@@ -116,10 +116,15 @@ def post_two_sided_quotes(
         )
         return True
 
-    # Prefer tick size from CLOB (docs: look up before quoting)
-    tick = get_tick_size(client, market.up_token_id) or market.tick_size
-    bid_price = round_to_tick(bid_price, tick)
-    ask_price = round_to_tick(ask_price, tick)
+    tick_s = get_tick_size(client, market.up_token_id) or market.tick_size
+    tick = float(tick_s)
+    bid_price = round_to_tick(bid_price, tick_s)
+    ask_price = round_to_tick(ask_price, tick_s)
+    # Enforce bid < ask: 18 bps can round to same price with 0.01 tick
+    if bid_price >= ask_price:
+        ask_price = min(0.99, bid_price + tick)
+    if bid_price >= ask_price:
+        bid_price = max(0.01, ask_price - tick)
     size = max(size, market.min_size)
 
     buffer_sec = config.minutes_before_resolution_to_stop * 60
