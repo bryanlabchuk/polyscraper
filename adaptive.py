@@ -22,10 +22,10 @@ FAIR_PRICE_GAP_THRESHOLD = 0.01
 # Inventory skew amount per side when over cap ($)
 INVENTORY_SKEW_AMOUNT = 0.001
 INVENTORY_SKEW_AMOUNT_LARGE = 0.002  # Stronger skew when > $200 long (bid down, ask down)
-# Position notional above which we apply inventory skew: $100 or 20% of cap; $200 = stronger skew
-INVENTORY_SKEW_CAP_USD = 100.0
+# Position notional above which we apply inventory skew: $150 (25% of per-market cap) for Phase 4
+INVENTORY_SKEW_CAP_USD = 150.0
 INVENTORY_SKEW_CAP_LARGE_USD = 200.0
-INVENTORY_SKEW_CAP_PCT = 0.20
+INVENTORY_SKEW_CAP_PCT = 0.25
 INVENTORY_MOMENTUM_CAP_USD = 200.0  # If long > this, zero momentum skew that would add to position
 
 # Midpoint history: condition_id -> deque of (ts, mid) for momentum/volatility
@@ -178,7 +178,7 @@ def get_fair_price(client, market_slug: str, max_trades: int = 10) -> Optional[f
     Prefers fills_log.csv (last 5 trades); falls back to API if insufficient.
     If book midpoint is skewed by fake walls (e.g. 12k at 0.01), use this instead.
     """
-    fair = get_fair_price_from_csv(market_slug, n=5)
+    fair = get_fair_price_from_csv(market_slug, n=10)
     if fair is not None:
         return fair
     try:
@@ -216,11 +216,12 @@ def get_inventory_skew(
     config: BotConfig,
 ) -> Tuple[float, float]:
     """
-    Inventory-aware skew: (bid_delta, ask_delta) when position exceeds $100 or 20% of cap.
-    Long Up: skew bid down and ask down to encourage market to buy from us (close position).
+    Inventory-aware skew: (bid_delta, ask_delta) when position exceeds $150 (25% of per-market cap).
+    Long: lower both Bid and Ask (stop buying, start selling). Short: raise both Bid and Ask.
     > $200 long: stronger skew (2 ticks).
     """
-    cap_usd = max(INVENTORY_SKEW_CAP_USD, config.max_total_capital * INVENTORY_SKEW_CAP_PCT)
+    per_market_cap = getattr(config, "max_position_per_market", 50.0)
+    cap_usd = max(INVENTORY_SKEW_CAP_USD, per_market_cap * INVENTORY_SKEW_CAP_PCT)
     notional_up = position_up * mid
     notional_down = position_down * (1.0 - mid)
     if notional_up > INVENTORY_SKEW_CAP_LARGE_USD:
@@ -232,6 +233,17 @@ def get_inventory_skew(
     if notional_down > INVENTORY_SKEW_CAP_LARGE_USD:
         return (INVENTORY_SKEW_AMOUNT_LARGE, INVENTORY_SKEW_AMOUNT_LARGE)
     if notional_down > cap_usd:
-        # Long Down: more aggressive bid to buy Up
+        # Long Down: raise bid and ask to encourage selling Down (close position)
         return (INVENTORY_SKEW_AMOUNT, INVENTORY_SKEW_AMOUNT)
     return (0.0, 0.0)
+
+
+def get_inventory_skew_for_market(client, market, mid: float, config: BotConfig) -> Tuple[float, float]:
+    """
+    Phase 4: get_inventory_skew(cid). Imports estimate_positions, fetches position for market,
+    returns skew when position exceeds $150 (25% of per-market cap).
+    """
+    from positions import estimate_positions
+    pos_map = estimate_positions(client, [market])
+    pu, pd = pos_map.get(market.condition_id, (0.0, 0.0))
+    return get_inventory_skew(pu, pd, mid, config)

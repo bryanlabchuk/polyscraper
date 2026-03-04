@@ -35,7 +35,7 @@ _shutdown = False
 _ws_client_ref = None  # Set when running for legacy signal handler
 MARKET_REFRESH_SECONDS = 300  # 5 min
 HEARTBEAT_LOG_SECONDS = 30  # Log alive status every N seconds
-WS_WATCHDOG_TIMEOUT = 15  # Montreal Watchdog: no activity 15s → cancel, alert, reconnect
+WS_WATCHDOG_TIMEOUT = 10  # Last-Mile Watchdog: no price update 10s → cancel, reconnect
 WS_WATCHDOG_HALT_SECONDS = 30  # Halt before reconnect to prevent ghost trading
 WS_WATCHDOG_CHECK_INTERVAL = 2  # Check every 2s
 
