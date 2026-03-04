@@ -86,6 +86,9 @@ class BotConfig:
     # Fill logging: append trades to fills_log.csv for analysis
     fill_logging_enabled: bool = True
 
+    # Auto-scale: size from wallet USDC balance at startup (order_size, max_position, max_total_capital)
+    auto_scale_from_balance: bool = True
+
     def __post_init__(self):
         self.private_key = os.getenv("PRIVATE_KEY", "").strip()
         self.funder = os.getenv("FUNDER", "").strip()
@@ -141,3 +144,4 @@ class BotConfig:
         self.seeking_timeout = float(os.getenv("SEEKING_TIMEOUT", str(self.seeking_timeout)))
         self.seeking_cache_ttl = int(os.getenv("SEEKING_CACHE_TTL", str(self.seeking_cache_ttl)))
         self.fill_logging_enabled = os.getenv("FILL_LOGGING_ENABLED", "true").lower() in ("true", "1", "yes")
+        self.auto_scale_from_balance = os.getenv("AUTO_SCALE_FROM_BALANCE", "true").lower() in ("true", "1", "yes")

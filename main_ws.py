@@ -197,27 +197,37 @@ async def main_async() -> None:
         len(token_ids),
     )
 
-    # Funding scaling: if balance > $500, cap order_size at 10% per market
-    try:
-        from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
-        params = BalanceAllowanceParams(
-            asset_type=AssetType.COLLATERAL,
-            signature_type=config.signature_type,
-        )
-        bal_resp = client.get_balance_allowance(params)
-        raw = (
-            float(bal_resp.get("balance") or bal_resp.get("currentBalance") or 0)
-            if isinstance(bal_resp, dict)
-            else float(getattr(bal_resp, "balance", 0) or 0)
-        )
-        balance_usdc = raw / 1e6 if raw > 1e4 else raw
-        if balance_usdc > 500:
-            cap = 0.1 * balance_usdc
-            if config.order_size > cap:
-                logger.info("Funding scaling: balance $%.0f > $500, capping order_size at 10%% per market: $%.1f", balance_usdc, cap)
-                config.order_size = cap
-    except Exception as e:
-        logger.debug("Balance check for funding scaling: %s", e)
+    # Auto-scale from wallet USDC: size order_size, max_position_per_market, max_total_capital by balance
+    if getattr(config, "auto_scale_from_balance", True):
+        try:
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.COLLATERAL,
+                signature_type=config.signature_type,
+            )
+            bal_resp = client.get_balance_allowance(params)
+            raw = (
+                float(bal_resp.get("balance") or bal_resp.get("currentBalance") or 0)
+                if isinstance(bal_resp, dict)
+                else float(getattr(bal_resp, "balance", 0) or 0)
+            )
+            balance_usdc = raw / 1e6 if raw > 1e4 else raw
+            if balance_usdc > 10:
+                effective = balance_usdc * 0.85
+                n = max(1, config.max_active_markets)
+                per_market = effective / n
+                order_cap = max(5, min(config.order_size, per_market * 0.2))
+                pos_cap = max(10, min(config.max_position_per_market, per_market * 0.5))
+                config.max_total_capital = effective
+                config.max_position_per_market = pos_cap
+                config.order_size = order_cap
+                config.inventory_cap_usd = effective * 0.25
+                logger.info(
+                    "Auto-scale from $%.1f USDC: order_size=$%.1f max_pos=$%.1f max_total=$%.1f",
+                    balance_usdc, config.order_size, config.max_position_per_market, config.max_total_capital,
+                )
+        except Exception as e:
+            logger.debug("Auto-scale from balance: %s", e)
 
     # Bootstrap: one full quote cycle to get orders in the book immediately
     logger.info("Bootstrap: posting initial quotes for %d markets...", len(markets))

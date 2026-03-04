@@ -77,6 +77,28 @@ def main():
     except Exception:
         pass
 
+    # Auto-scale from wallet USDC (same as main_ws.py)
+    if getattr(config, "auto_scale_from_balance", True):
+        try:
+            _c = create_client(config, read_only=False)
+            if _c:
+                from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+                params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=config.signature_type)
+                bal_resp = _c.get_balance_allowance(params)
+                raw = float(bal_resp.get("balance") or bal_resp.get("currentBalance") or 0) if isinstance(bal_resp, dict) else float(getattr(bal_resp, "balance", 0) or 0)
+                balance_usdc = raw / 1e6 if raw > 1e4 else raw
+                if balance_usdc > 10:
+                    effective = balance_usdc * 0.85
+                    n = max(1, config.max_active_markets)
+                    per_market = effective / n
+                    config.max_total_capital = effective
+                    config.max_position_per_market = max(10, min(config.max_position_per_market, per_market * 0.5))
+                    config.order_size = max(5, min(config.order_size, per_market * 0.2))
+                    config.inventory_cap_usd = effective * 0.25
+                    logger.info("Auto-scale from $%.1f USDC: order_size=$%.1f max_pos=$%.1f", balance_usdc, config.order_size, config.max_position_per_market)
+        except Exception as e:
+            logger.debug("Auto-scale from balance: %s", e)
+
     j = getattr(config, "cycle_jitter_seconds", 0)
     logger.info("Starting BTC 5m market maker (cycle: %ds%s)",
                config.quote_refresh_seconds, f" + 0-{j}s jitter" if j > 0 else "")
