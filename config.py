@@ -28,15 +28,15 @@ class BotConfig:
     max_total_capital: float = 150.0
     max_active_markets: int = 2
     quote_refresh_seconds: int = 5  # Fast cycle (REST); use main_ws.py for event-driven
-    min_quote_interval_seconds: float = 10.0  # 10s time-on-book for 2026 Loyalty Multiplier
+    min_quote_interval_seconds: float = 15.0  # 15s time-on-book for 2026 Loyalty Multiplier
     minutes_before_resolution_to_stop: int = 1  # Stay in longer, more risk
 
     # BTC 5m market discovery
     btc_5m_series_slug: str = "btc-up-or-down-5m"
     btc_5m_slug_prefix: str = "btc-updown-5m"
-    # Hot zone: only quote when mid in [0.30, 0.70]; outside = cancel and rotate off (fee-curve peak ~0.50)
-    high_reward_mid_min: float = 0.30
-    high_reward_mid_max: float = 0.70
+    # Hot zone: only quote when mid in [0.40, 0.60]; stay in fee-curve peak for quadratic reward
+    high_reward_mid_min: float = 0.40
+    high_reward_mid_max: float = 0.60
     # Tight-spread bonus: 0.5¢ total (mid ± 0.0025) = 100% quadratic reward score
     rebate_tight_spread: bool = True
 

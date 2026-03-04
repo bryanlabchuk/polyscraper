@@ -8,10 +8,14 @@ Adaptive algorithms for the market maker.
 - Inventory skew: lean quotes to reduce position when over cap
 """
 
+import csv
 from collections import deque
+from pathlib import Path
 from typing import Optional, Tuple
 
 from config import BotConfig
+
+FILLS_LOG = Path(__file__).parent / "fills_log.csv"
 
 # Gap between book mid and fair price above which we use fair price (anti-manipulation)
 FAIR_PRICE_GAP_THRESHOLD = 0.01
@@ -133,17 +137,55 @@ def get_volatility_extra_bps(condition_id: str, mid: float, config: BotConfig) -
     return 0
 
 
+def get_fair_price_from_csv(market_slug: str, n: int = 5) -> Optional[float]:
+    """
+    Fair price from fills_log.csv: median of last N trades for this market.
+    Primary source for anti-manipulation (avoids API latency; uses our actual fills).
+    """
+    if not FILLS_LOG.exists():
+        return None
+    collected: list[tuple[int, float]] = []
+    try:
+        with open(FILLS_LOG) as f:
+            r = csv.DictReader(f)
+            for row in r:
+                slug = (row.get("market_slug") or "").strip()
+                if slug != market_slug:
+                    continue
+                try:
+                    ts_val = int(row.get("timestamp") or 0)
+                    p = float(row.get("price") or 0)
+                    if 0 < p <= 1:
+                        collected.append((ts_val, p))
+                except (TypeError, ValueError):
+                    continue
+    except Exception:
+        return None
+    if len(collected) < 2:
+        return None
+    collected.sort(key=lambda x: -x[0])
+    recent_prices = [p for _, p in collected[:n]]
+    recent_prices.sort()
+    m = len(recent_prices)
+    if m % 2 == 1:
+        return recent_prices[m // 2]
+    return (recent_prices[m // 2 - 1] + recent_prices[m // 2]) / 2.0
+
+
 def get_fair_price(client, market_slug: str, max_trades: int = 10) -> Optional[float]:
     """
     Anti-manipulation: fair price from our recent fills (median of last N trades).
-    If book midpoint is skewed by fake walls (e.g. 12k at 0.01), we use this instead.
-    Returns None if insufficient trades.
+    Prefers fills_log.csv (last 5 trades); falls back to API if insufficient.
+    If book midpoint is skewed by fake walls (e.g. 12k at 0.01), use this instead.
     """
+    fair = get_fair_price_from_csv(market_slug, n=5)
+    if fair is not None:
+        return fair
     try:
         trades = client.get_trades(params=None) or []
     except Exception:
         return None
-    collected = []
+    collected: list[tuple[int, float]] = []
     for t in trades:
         slug = t.get("eventSlug") or t.get("slug") or ""
         if slug != market_slug:
@@ -158,7 +200,6 @@ def get_fair_price(client, market_slug: str, max_trades: int = 10) -> Optional[f
                 continue
     if len(collected) < 2:
         return None
-    # Sort by timestamp descending (newest first), take last N, median of prices
     collected.sort(key=lambda x: -x[0])
     recent_prices = [p for _, p in collected[:max_trades]]
     recent_prices.sort()

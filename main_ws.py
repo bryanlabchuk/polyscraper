@@ -35,7 +35,7 @@ _shutdown = False
 _ws_client_ref = None  # Set when running for legacy signal handler
 MARKET_REFRESH_SECONDS = 300  # 5 min
 HEARTBEAT_LOG_SECONDS = 30  # Log alive status every N seconds
-WS_WATCHDOG_TIMEOUT = 10  # Miss heartbeat twice (2×5s) then cancel and halt
+WS_WATCHDOG_TIMEOUT = 15  # Montreal Watchdog: no activity 15s → cancel, alert, reconnect
 WS_WATCHDOG_HALT_SECONDS = 30  # Halt before reconnect to prevent ghost trading
 WS_WATCHDOG_CHECK_INTERVAL = 2  # Check every 2s
 
@@ -197,6 +197,28 @@ async def main_async() -> None:
         len(token_ids),
     )
 
+    # Funding scaling: if balance > $500, cap order_size at 10% per market
+    try:
+        from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+        params = BalanceAllowanceParams(
+            asset_type=AssetType.COLLATERAL,
+            signature_type=config.signature_type,
+        )
+        bal_resp = client.get_balance_allowance(params)
+        raw = (
+            float(bal_resp.get("balance") or bal_resp.get("currentBalance") or 0)
+            if isinstance(bal_resp, dict)
+            else float(getattr(bal_resp, "balance", 0) or 0)
+        )
+        balance_usdc = raw / 1e6 if raw > 1e4 else raw
+        if balance_usdc > 500:
+            cap = 0.1 * balance_usdc
+            if config.order_size > cap:
+                logger.info("Funding scaling: balance $%.0f > $500, capping order_size at 10%% per market: $%.1f", balance_usdc, cap)
+                config.order_size = cap
+    except Exception as e:
+        logger.debug("Balance check for funding scaling: %s", e)
+
     # Bootstrap: one full quote cycle to get orders in the book immediately
     logger.info("Bootstrap: posting initial quotes for %d markets...", len(markets))
     try:
@@ -278,7 +300,7 @@ async def main_async() -> None:
                 break
             ts = getattr(ws_client, "last_activity_ts", 0) or 0
             if ts > 0 and (time.time() - ts) > WS_WATCHDOG_TIMEOUT:
-                logger.warning("Watchdog: no WS activity for %ds, cancelling orders and halting %ds...", WS_WATCHDOG_TIMEOUT, WS_WATCHDOG_HALT_SECONDS)
+                logger.warning("Network Lag Alert: no WS activity for %ds. Cancelling orders and halting %ds...", WS_WATCHDOG_TIMEOUT, WS_WATCHDOG_HALT_SECONDS)
                 try:
                     loop = asyncio.get_running_loop()
                     await loop.run_in_executor(None, lambda: cancel_all_orders(client, config))
