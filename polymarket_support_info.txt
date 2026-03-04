@@ -1,0 +1,31 @@
+Polymarket API – Invalid Signature Support Request
+==================================================
+
+Copy this when asking for help in Polymarket Discord (discord.gg/polymarket) #dev or #API:
+
+---
+
+Hi, I'm getting "invalid signature" when posting orders via py-clob-client. I've tried all documented configs and none work.
+
+Environment:
+- py-clob-client: 0.34.6
+- Python: 3.12
+- Chain: Polygon (137)
+
+Configs tried:
+- SIGNATURE_TYPE=0 (EOA), funder=wallet or empty → invalid signature
+- SIGNATURE_TYPE=1 (POLY_PROXY), FUNDER=profile address → invalid signature  
+- SIGNATURE_TYPE=2 (GNOSIS_SAFE), FUNDER=profile address → invalid signature
+
+My setup:
+- Wallet (from private key): 0x680Ca2CCF78aE6DEa52CE18B47741d9D2AB7DE73
+- Polymarket profile address (from URL): 0x697Ab41Fca1346A357E4995dAc01A5DA2800b7F3
+- I connect to Polymarket with MetaMask. I can trade in the browser.
+- I've done a real trade to activate the account.
+- FORCE_DERIVE_API_KEY=true and create_or_derive both tried.
+
+The API key derivation works (no 401). Orders are rejected with "invalid signature" in the response body.
+
+Is there a known issue with py-clob-client + proxy wallet, or something specific I need to do to link my MetaMask (0x680...) to my profile (0x697...) for API trading?
+
+---
