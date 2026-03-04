@@ -15,9 +15,9 @@ import signal
 import sys
 
 from config import BotConfig
-from client import create_client, cancel_all_orders
+from client import create_client, cancel_all_orders, count_open_orders
 from markets import BTCMarket, fetch_btc_5m_markets
-from strategy import run_single_market_quote, _minutes_to_resolution
+from strategy import run_single_market_quote, run_market_making_cycle, _minutes_to_resolution
 from fill_logger import log_fills
 from ws_client import WSClient
 
@@ -87,14 +87,16 @@ def _on_price_update_sync(
     mid: float,
     book_summary: dict,
 ) -> None:
-    """Sync handler: run quote update for the market (only when asset is up_token)."""
+    """Sync handler: run quote update for the market. Up token: use mid. Down token: mid_up = 1 - mid."""
     market = token_to_market.get(asset_id)
     if not market:
         return
-    if asset_id != market.up_token_id:
-        return
     books_cache[asset_id] = book_summary
-    run_single_market_quote(client, market, mid, book_summary, config, books_cache)
+    if asset_id == market.up_token_id:
+        run_single_market_quote(client, market, mid, book_summary, config, books_cache)
+    else:
+        mid_up = 1.0 - mid
+        run_single_market_quote(client, market, mid_up, book_summary, config, books_cache)
 
 
 async def main_async() -> None:
@@ -155,6 +157,16 @@ async def main_async() -> None:
         len(markets),
         len(token_ids),
     )
+
+    # Bootstrap: one full quote cycle to get orders in the book immediately
+    logger.info("Bootstrap: posting initial quotes for %d markets...", len(markets))
+    try:
+        run_market_making_cycle(config)
+        n = count_open_orders(client)
+        if n >= 0:
+            logger.info("Open orders on Polymarket: %d (if 0, check token approvals)", n)
+    except Exception as e:
+        logger.warning("Bootstrap cycle error: %s", e)
 
     if config.fill_logging_enabled:
         try:
