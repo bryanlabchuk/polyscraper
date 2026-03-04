@@ -17,9 +17,12 @@ from config import BotConfig
 FAIR_PRICE_GAP_THRESHOLD = 0.01
 # Inventory skew amount per side when over cap ($)
 INVENTORY_SKEW_AMOUNT = 0.001
-# Position notional above which we apply inventory skew: $100 or 20% of cap
+INVENTORY_SKEW_AMOUNT_LARGE = 0.002  # Stronger skew when > $200 long (bid down, ask down)
+# Position notional above which we apply inventory skew: $100 or 20% of cap; $200 = stronger skew
 INVENTORY_SKEW_CAP_USD = 100.0
+INVENTORY_SKEW_CAP_LARGE_USD = 200.0
 INVENTORY_SKEW_CAP_PCT = 0.20
+INVENTORY_MOMENTUM_CAP_USD = 200.0  # If long > this, zero momentum skew that would add to position
 
 # Midpoint history: condition_id -> deque of (ts, mid) for momentum/volatility
 _midpoint_history: dict[str, deque] = {}
@@ -69,9 +72,16 @@ def get_resolution_size_mult(minutes_left: float, config: BotConfig) -> float:
     return 0.25
 
 
-def get_momentum_skew_bps(condition_id: str, mid: float, config: BotConfig) -> float:
+def get_momentum_skew_bps(
+    condition_id: str,
+    mid: float,
+    config: BotConfig,
+    notional_long_up: Optional[float] = None,
+    notional_long_down: Optional[float] = None,
+) -> float:
     """
     Skew midpoint toward recent price direction. If mid has been rising, skew up slightly.
+    Inventory-blind: if notional_long_up > $200 and momentum is bullish, return 0 (don't add to long).
     Returns bps to add to mid (positive = bullish skew).
     """
     import time
@@ -79,18 +89,20 @@ def get_momentum_skew_bps(condition_id: str, mid: float, config: BotConfig) -> f
         return 0.0
     q = _midpoint_history[condition_id]
     now = time.time()
-    # Recent points within momentum window
     recent = [(t, m) for t, m in q if now - t < MOMENTUM_WINDOW_SEC]
     if len(recent) < 4:
         return 0.0
     first_mid = recent[0][1]
     last_mid = recent[-1][1]
     delta = last_mid - first_mid
-    # Max skew ±15 bps from momentum
+    # If we're long and momentum would add to that side, zero out (inventory trap)
+    if (notional_long_up or 0) > INVENTORY_MOMENTUM_CAP_USD and delta > 0:
+        return 0.0
+    if (notional_long_down or 0) > INVENTORY_MOMENTUM_CAP_USD and delta < 0:
+        return 0.0
     max_skew_bps = 15
     if abs(delta) < 0.005:
         return 0.0
-    # Scale: delta 0.02 -> ~10 bps skew
     skew = max(-max_skew_bps, min(max_skew_bps, delta * 500))
     return skew
 
@@ -164,15 +176,21 @@ def get_inventory_skew(
 ) -> Tuple[float, float]:
     """
     Inventory-aware skew: (bid_delta, ask_delta) when position exceeds $100 or 20% of cap.
-    Long Up -> lower ask (sell more), raise bid slightly. Long Down -> raise bid (buy Up to reduce).
+    Long Up: skew bid down and ask down to encourage market to buy from us (close position).
+    > $200 long: stronger skew (2 ticks).
     """
     cap_usd = max(INVENTORY_SKEW_CAP_USD, config.max_total_capital * INVENTORY_SKEW_CAP_PCT)
     notional_up = position_up * mid
     notional_down = position_down * (1.0 - mid)
+    if notional_up > INVENTORY_SKEW_CAP_LARGE_USD:
+        # Long Up > $200: stronger skew (bid down, ask down)
+        return (-INVENTORY_SKEW_AMOUNT_LARGE, -INVENTORY_SKEW_AMOUNT_LARGE)
     if notional_up > cap_usd:
-        # Long Up: encourage selling Up -> lower ask, raise bid (narrow spread toward selling)
-        return (INVENTORY_SKEW_AMOUNT, -INVENTORY_SKEW_AMOUNT)
+        # Long Up: bid down, ask down to encourage selling
+        return (-INVENTORY_SKEW_AMOUNT, -INVENTORY_SKEW_AMOUNT)
+    if notional_down > INVENTORY_SKEW_CAP_LARGE_USD:
+        return (INVENTORY_SKEW_AMOUNT_LARGE, INVENTORY_SKEW_AMOUNT_LARGE)
     if notional_down > cap_usd:
-        # Long Down: encourage buying Up (reduce Down) -> more aggressive bid
+        # Long Down: more aggressive bid to buy Up
         return (INVENTORY_SKEW_AMOUNT, INVENTORY_SKEW_AMOUNT)
     return (0.0, 0.0)

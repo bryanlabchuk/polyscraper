@@ -87,6 +87,8 @@ def compute_quotes(
     imbalance: Optional[float] = None,
     seeking_signal: Optional[SeekingSignal] = None,
     minutes_left: Optional[float] = None,
+    notional_long_up: Optional[float] = None,
+    notional_long_down: Optional[float] = None,
 ) -> tuple[float, float]:
     """
     Compute bid and ask prices around midpoint.
@@ -104,9 +106,13 @@ def compute_quotes(
     if imbalance is not None:
         mid = mid + _imbalance_skew(imbalance, config)
         mid = max(0.01, min(0.99, mid))
-    # Momentum skew: toward recent price direction (adaptive)
+    # Momentum skew: toward recent price direction (inventory-aware: don't add when long > $200)
     if condition_id and getattr(config, "adaptive_momentum_skew", True):
-        mom = get_momentum_skew_bps(condition_id, mid, config)
+        mom = get_momentum_skew_bps(
+            condition_id, mid, config,
+            notional_long_up=notional_long_up,
+            notional_long_down=notional_long_down,
+        )
         if mom != 0:
             mid = mid + mom / 10000
             mid = max(0.01, min(0.99, mid))
@@ -225,6 +231,15 @@ def run_single_market_quote(
         mins_left = _minutes_to_resolution(market)
         record_mid(market.condition_id, mid)
 
+        notional_up, notional_down = None, None
+        try:
+            pos_map = estimate_positions(client, [market])
+            pu, pd = pos_map.get(market.condition_id, (0.0, 0.0))
+            notional_up = pu * mid
+            notional_down = pd * (1.0 - mid)
+        except Exception:
+            pass
+
         depth = book_summary.get("depth") or 0
         if depth > 0 and config.min_book_depth > 0 and depth < config.min_book_depth:
             return False
@@ -270,7 +285,9 @@ def run_single_market_quote(
         if bid is None or ask is None:
             min_spread_bps = max(config.spread_bps, int(tick * 13000))
             bid, ask = compute_quotes(
-                mid, min_spread_bps, market.tick_size, config, market.condition_id, imbalance, seeking_signal, mins_left
+                mid, min_spread_bps, market.tick_size, config, market.condition_id, imbalance, seeking_signal, mins_left,
+                notional_long_up=notional_up,
+                notional_long_down=notional_down,
             )
         # Tight-spread bonus: 0.5¢ total = 100% quadratic reward score (2026)
         if getattr(config, "rebate_tight_spread", False):
@@ -278,10 +295,10 @@ def run_single_market_quote(
             ask = round_to_tick(mid + 0.0025, market.tick_size)
             if bid >= ask:
                 ask = min(0.99, bid + tick)
-        # Inventory skew: lean quotes to reduce position when over $100 or 20% of cap
+        # Inventory skew: lean quotes when position > $100 or 20% of cap (reuse notional from above)
         try:
-            positions = estimate_positions(client, [market])
-            pu, pd = positions.get(market.condition_id, (0.0, 0.0))
+            pu = (notional_up / mid) if (notional_up is not None and mid > 0) else 0.0
+            pd = (notional_down / (1.0 - mid)) if (notional_down is not None and mid < 1) else 0.0
             bd, ad = get_inventory_skew(pu, pd, mid, config)
             if bd != 0 or ad != 0:
                 bid = round_to_tick(bid + bd, market.tick_size)
@@ -308,15 +325,13 @@ def run_single_market_quote(
         ok = False
         if cap_usd > 0:
             try:
-                positions = estimate_positions(client, [market])
-                pu, pd = positions.get(market.condition_id, (0.0, 0.0))
-                notional_up = pu * mid
-                notional_down = pd * (1.0 - mid)
-                if notional_up > cap_usd:
+                n_up = notional_up if notional_up is not None else 0.0
+                n_down = notional_down if notional_down is not None else 0.0
+                if n_up > cap_usd:
                     ok = post_sell_order(client, market, market.up_token_id, ask, size, config)
                     if ok:
                         logger.info("Inventory cap: ask-only (reduce Up) on %s", market.event_slug[:30])
-                elif notional_down > cap_usd:
+                elif n_down > cap_usd:
                     ok = post_bid_only(client, market, market.up_token_id, bid, size, config)
                     if ok:
                         logger.info("Inventory cap: bid-only (reduce Down) on %s", market.event_slug[:30])
@@ -456,6 +471,15 @@ def run_market_making_cycle(config: BotConfig) -> None:
         record_mid(market.condition_id, mid)
         _last_quoted_mid[market.condition_id] = mid
 
+        notional_up_cycle = notional_down_cycle = None
+        try:
+            pos_cycle = estimate_positions(client, markets)
+            pu, pd = pos_cycle.get(market.condition_id, (0.0, 0.0))
+            notional_up_cycle = pu * mid
+            notional_down_cycle = pd * (1.0 - mid)
+        except Exception:
+            pass
+
         # Thin book: skip markets with very low liquidity (high adverse selection risk)
         depth = (book_summary.get("depth") if book_summary else None) or get_book_depth(client, market.up_token_id)
         if config.min_book_depth > 0 and depth is not None and depth < config.min_book_depth:
@@ -503,17 +527,19 @@ def run_market_making_cycle(config: BotConfig) -> None:
         if bid is None or ask is None:
             min_spread_bps = max(config.spread_bps, int(tick * 13000))
             bid, ask = compute_quotes(
-                mid, min_spread_bps, market.tick_size, config, market.condition_id, imbalance, seeking_signal, mins_left
+                mid, min_spread_bps, market.tick_size, config, market.condition_id, imbalance, seeking_signal, mins_left,
+                notional_long_up=notional_up_cycle,
+                notional_long_down=notional_down_cycle,
             )
         if getattr(config, "rebate_tight_spread", False):
             bid = round_to_tick(mid - 0.0025, market.tick_size)
             ask = round_to_tick(mid + 0.0025, market.tick_size)
             if bid >= ask:
                 ask = min(0.99, bid + tick)
-        # Inventory skew (REST): lean quotes when position > $100 or 20% of cap
+        # Inventory skew (REST): reuse notional from above
         try:
-            pos_rest = estimate_positions(client, markets)
-            pu, pd = pos_rest.get(market.condition_id, (0.0, 0.0))
+            pu = (notional_up_cycle / mid) if (notional_up_cycle is not None and mid > 0) else 0.0
+            pd = (notional_down_cycle / (1.0 - mid)) if (notional_down_cycle is not None and mid < 1) else 0.0
             bd, ad = get_inventory_skew(pu, pd, mid, config)
             if bd != 0 or ad != 0:
                 bid = round_to_tick(bid + bd, market.tick_size)
@@ -543,13 +569,11 @@ def run_market_making_cycle(config: BotConfig) -> None:
         cap_usd = getattr(config, "inventory_cap_usd", 0) or (0.25 * config.max_total_capital)
         if cap_usd > 0:
             try:
-                positions = estimate_positions(client, markets)
-                pu, pd = positions.get(market.condition_id, (0.0, 0.0))
-                notional_up = pu * mid
-                notional_down = pd * (1.0 - mid)
-                if notional_up > cap_usd:
+                n_up = notional_up_cycle if notional_up_cycle is not None else 0.0
+                n_down = notional_down_cycle if notional_down_cycle is not None else 0.0
+                if n_up > cap_usd:
                     ok = post_sell_order(client, market, market.up_token_id, ask, size, config)
-                elif notional_down > cap_usd:
+                elif n_down > cap_usd:
                     ok = post_bid_only(client, market, market.up_token_id, bid, size, config)
                 else:
                     ok = post_two_sided_quotes(client, market, bid, ask, size, config)
