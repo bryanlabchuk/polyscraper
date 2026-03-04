@@ -13,12 +13,14 @@ import asyncio
 import logging
 import signal
 import sys
+import time
 
 from config import BotConfig
 from client import create_client, cancel_all_orders, count_open_orders
 from markets import BTCMarket, fetch_btc_5m_markets
 from strategy import run_single_market_quote, run_market_making_cycle, _minutes_to_resolution
 from fill_logger import log_fills
+from rebates import log_rebates_today
 from ws_client import WSClient
 
 logging.basicConfig(
@@ -33,6 +35,8 @@ _shutdown = False
 _ws_client_ref = None  # Set when running for legacy signal handler
 MARKET_REFRESH_SECONDS = 300  # 5 min
 HEARTBEAT_LOG_SECONDS = 30  # Log alive status every N seconds
+WS_WATCHDOG_TIMEOUT = 7  # If no price_update/heartbeat for this long, cancel all and reconnect
+WS_WATCHDOG_CHECK_INTERVAL = 2  # Check every 2s
 
 
 def _build_token_to_market(markets: list[BTCMarket]) -> dict[str, BTCMarket]:
@@ -207,22 +211,80 @@ async def main_async() -> None:
             n = len(token_to_market) // 2  # up+down per market
             logger.info("Heartbeat: WS connected, %d markets, %d tokens", n, len(token_to_market))
 
-    refresh_task = asyncio.create_task(_market_refresh_loop(ws_client, token_to_market, config))
-    heartbeat_task = asyncio.create_task(_heartbeat_log_loop())
-    ws_task = asyncio.create_task(ws_client.run())
+    async def _rebates_poll_loop() -> None:
+        """Poll rebates API hourly and log rebated_fees_usdc."""
+        interval = max(60, getattr(config, "rebates_poll_interval_seconds", 3600))
+        addr = maker_address
+        clob = config.clob_host
+        while not _shutdown:
+            await asyncio.sleep(interval)
+            if _shutdown:
+                break
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, lambda: log_rebates_today(addr, clob))
+            except Exception as e:
+                logger.debug("Rebates poll failed: %s", e)
 
-    done, pending = await asyncio.wait(
-        [refresh_task, heartbeat_task, ws_task],
-        return_when=asyncio.FIRST_COMPLETED,
-    )
-    for t in pending:
-        t.cancel()
-    for t in [refresh_task, heartbeat_task, ws_task]:
+    maker_address = config.funder or ""
+    if client and hasattr(client, "get_address"):
         try:
-            await t
-        except asyncio.CancelledError:
+            maker_address = (client.get_address() or maker_address) or ""
+        except Exception:
             pass
-    ws_client.stop()
+
+    reconnect_requested = [False]  # Watchdog sets to True to trigger reconnect
+
+    async def _watchdog_loop() -> None:
+        """If no WS activity for 7s, cancel all orders and request reconnect (Montreal brick)."""
+        while not _shutdown:
+            await asyncio.sleep(WS_WATCHDOG_CHECK_INTERVAL)
+            if _shutdown:
+                break
+            ts = getattr(ws_client, "last_activity_ts", 0) or 0
+            if ts > 0 and (time.time() - ts) > WS_WATCHDOG_TIMEOUT:
+                logger.warning("Watchdog: no WS activity for %ds, cancelling orders and reconnecting...", WS_WATCHDOG_TIMEOUT)
+                try:
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(None, lambda: cancel_all_orders(client, config))
+                except Exception as e:
+                    logger.error("Watchdog cancel_all failed: %s", e)
+                reconnect_requested[0] = True
+                ws_client.stop()
+                return
+
+    while not _shutdown:
+        refresh_task = asyncio.create_task(_market_refresh_loop(ws_client, token_to_market, config))
+        heartbeat_task = asyncio.create_task(_heartbeat_log_loop())
+        ws_task = asyncio.create_task(ws_client.run())
+        watchdog_task = asyncio.create_task(_watchdog_loop())
+        tasks = [refresh_task, heartbeat_task, ws_task, watchdog_task]
+        if maker_address and getattr(config, "rebates_poll_interval_seconds", 0) > 0:
+            tasks.append(asyncio.create_task(_rebates_poll_loop()))
+
+        done, pending = await asyncio.wait(
+            tasks,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for t in pending:
+            t.cancel()
+        for t in tasks:
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
+        ws_client.stop()
+        if reconnect_requested[0]:
+            reconnect_requested[0] = False
+            logger.info("Reconnecting WebSocket...")
+            ws_client = WSClient(
+                asset_ids=token_ids,
+                on_price_update=on_price_update,
+                heartbeat_interval=5.0,
+            )
+            _ws_client_ref = ws_client
+            continue
+        break
 
 
 def _on_signal(signum, frame) -> None:

@@ -8,6 +8,7 @@ Only triggers quote updates when real price moves occur (event-driven).
 import asyncio
 import json
 import logging
+import time
 from typing import Callable, Optional
 
 import websockets
@@ -124,6 +125,7 @@ class WSClient:
         self._ws = None
         self._running = False
         self._subscribed = set()
+        self.last_activity_ts: float = 0.0  # Watchdog: updated on every message/PONG
 
     async def connect(self) -> bool:
         """Connect and subscribe."""
@@ -135,6 +137,7 @@ class WSClient:
                 close_timeout=5,
             )
             self._running = True
+            self.last_activity_ts = time.time()
             await self._subscribe()
             return True
         except Exception as e:
@@ -172,6 +175,7 @@ class WSClient:
         heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         try:
             async for raw in self._ws:
+                self.last_activity_ts = time.time()
                 if not self._running:
                     break
                 try:

@@ -2,6 +2,7 @@
 
 import logging
 import random
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -15,13 +16,13 @@ from client import (
     mid_from_book_summary,
     get_book_depth,
     post_two_sided_quotes,
-    post_secondary_quotes,
+    post_sell_order,
+    post_bid_only,
     cancel_market_orders,
     fee_rate_available,
-    get_arb_opportunity,
-    post_arb_bids,
-    execute_arb_taker,
+    round_to_tick,
 )
+from positions import estimate_positions
 
 from config import BotConfig
 from seeking import fetch_signal, SeekingSignal
@@ -32,10 +33,10 @@ from adaptive import (
     get_resolution_size_mult,
     get_momentum_skew_bps,
     get_volatility_extra_bps,
+    get_fair_price,
+    get_inventory_skew,
+    FAIR_PRICE_GAP_THRESHOLD,
 )
-from positions import estimate_positions
-from resolution_actions import try_one_sided_arb_exit, try_arb_completion
-
 logger = logging.getLogger(__name__)
 
 # Cooldown for markets that fail (e.g. fee-rate 404). condition_id -> retry_after_ts
@@ -44,8 +45,20 @@ _market_fail_cooldown: dict[str, float] = {}
 _last_quoted_mid: dict[str, float] = {}
 # Throttle: condition_id -> last quote timestamp (let orders sit on book long enough to get filled)
 _last_quote_ts: dict[str, float] = {}
+# Per-market lock: prevents overlapping cancel/post when WS fires for same market (up + down token)
+_order_locks: dict[str, threading.Lock] = {}
+_lock_factory = threading.Lock()
 COOLDOWN_SECONDS = 300  # 5 min
 MIN_QUOTE_INTERVAL_SECONDS = 2.5  # Don't cancel/repost same market more than once per 2.5s
+ORDER_LOCK_TIMEOUT = 5  # Max seconds to wait for another update to finish (then skip)
+
+
+def _order_lock_for(condition_id: str) -> threading.Lock:
+    """Per-market lock so we never run overlapping cancel/post for the same market."""
+    with _lock_factory:
+        if condition_id not in _order_locks:
+            _order_locks[condition_id] = threading.Lock()
+        return _order_locks[condition_id]
 
 
 def _jitter(value: float, pct: int, enabled: bool) -> float:
@@ -157,11 +170,21 @@ def run_single_market_quote(
     Call when book or price_change indicates a real price move.
     Returns True if quotes were posted.
     """
-    global _market_fail_cooldown, _last_quote_ts
+    global _market_fail_cooldown, _last_quote_ts, _last_quoted_mid
     now = time.time()
     if market.condition_id in _market_fail_cooldown:
         return False
-    # Throttle: let orders sit on book at least 2.5s so they can get filled
+    # Hot zone: if mid outside [0.30, 0.70], cancel orders and don't repost (rotate off)
+    mid_min = getattr(config, "high_reward_mid_min", 0.30)
+    mid_max = getattr(config, "high_reward_mid_max", 0.70)
+    if mid < mid_min or mid > mid_max:
+        cancel_market_orders(client, market.condition_id, config)
+        return False
+    # Anti-manipulation: if book mid is far from fair price (our fills), use fair price
+    fair = get_fair_price(client, market.event_slug)
+    if fair is not None and abs(mid - fair) > FAIR_PRICE_GAP_THRESHOLD:
+        mid = fair
+    # Throttle: keep orders on book at least min_quote_interval (e.g. 10s for Loyalty Multiplier)
     min_interval = getattr(config, "min_quote_interval_seconds", MIN_QUOTE_INTERVAL_SECONDS)
     last_ts = _last_quote_ts.get(market.condition_id, 0)
     if now - last_ts < min_interval:
@@ -171,82 +194,148 @@ def run_single_market_quote(
     if not fee_rate_available(client, market.up_token_id):
         _market_fail_cooldown[market.condition_id] = now + COOLDOWN_SECONDS
         return False
+    # Drift threshold: do not cancel or update unless mid moved > MIN_MIDPOINT_DRIFT (build time-on-book)
+    drift_threshold = getattr(config, "min_midpoint_drift", None)
+    if drift_threshold is None or drift_threshold <= 0:
+        drift_threshold = config.trailing_mid_threshold_bps / 10000
+    last = _last_quoted_mid.get(market.condition_id)
+    drift = abs(mid - last) if last is not None else float("inf")
+    if last is not None and drift < drift_threshold:
+        return False  # Price hasn't moved enough; stay on book for rebates
 
-    cancel_market_orders(client, market.condition_id, config)
-    if config.anti_snipe_jitter and config.cancel_post_delay_max > 0:
-        delay = random.uniform(config.cancel_post_delay_min, config.cancel_post_delay_max)
-        time.sleep(delay)
-
-    mins_left = _minutes_to_resolution(market)
-    record_mid(market.condition_id, mid)
-    threshold = config.trailing_mid_threshold_bps / 10000
-    last = _last_quoted_mid.get(market.condition_id, mid)
-    if abs(mid - last) < threshold:
-        mid = last
-    else:
-        _last_quoted_mid[market.condition_id] = mid
-
-    depth = book_summary.get("depth") or 0
-    # Only enforce min_book_depth when we have depth data (full book). price_change has depth=0.
-    if depth > 0 and config.min_book_depth > 0 and depth < config.min_book_depth:
+    # Serialize cancel+post for this market (WS can fire for up and down token; only one update at a time)
+    lock = _order_lock_for(market.condition_id)
+    if not lock.acquire(blocking=True, timeout=ORDER_LOCK_TIMEOUT):
+        logger.debug("Skip quote update for %s (lock timeout)", market.condition_id[:20])
         return False
+    try:
+        # Re-check drift after acquiring lock (other thread may have just updated)
+        last = _last_quoted_mid.get(market.condition_id)
+        if last is not None and abs(mid - last) < drift_threshold:
+            return False
+        logger.info("Significant drift detected (%.4f). Updating quotes for %s...", drift, market.event_slug[:30])
+        # Cancel-then-post: only post new order after cancel is confirmed (avoids "shadow" orders)
+        if not cancel_market_orders(client, market.condition_id, config):
+            _market_fail_cooldown[market.condition_id] = now + COOLDOWN_SECONDS
+            return False
+        if config.anti_snipe_jitter and getattr(config, "cancel_post_delay_max", 0) > 0:
+            delay = random.uniform(config.cancel_post_delay_min, config.cancel_post_delay_max)
+            time.sleep(delay)
 
-    seeking_signal = None
-    if config.seeking_enabled and (config.seeking_pipeline_url or config.seeking_pipeline_file):
-        seeking_signal = fetch_signal(
-            market_slug=market.event_slug,
-            condition_id=market.condition_id,
-            mid=mid,
-            minutes_to_resolution=mins_left,
-            pipeline_url=config.seeking_pipeline_url or None,
-            pipeline_file=config.seeking_pipeline_file or None,
-            pipeline_method=config.seeking_pipeline_method,
-            timeout=config.seeking_timeout,
-            use_cache=True,
-            cache_ttl=config.seeking_cache_ttl,
-        )
-        if seeking_signal and seeking_signal.pause:
+        mins_left = _minutes_to_resolution(market)
+        record_mid(market.condition_id, mid)
+
+        depth = book_summary.get("depth") or 0
+        if depth > 0 and config.min_book_depth > 0 and depth < config.min_book_depth:
             return False
 
-    imbalance = book_summary.get("imbalance")
-    tick = float(market.tick_size)
-    min_spread_bps = max(config.spread_bps, int(tick * 13000))
-    bid, ask = compute_quotes(
-        mid, min_spread_bps, market.tick_size, config, market.condition_id, imbalance, seeking_signal, mins_left
-    )
-    if bid >= ask:
-        return False
+        seeking_signal = None
+        if config.seeking_enabled and (config.seeking_pipeline_url or config.seeking_pipeline_file):
+            seeking_signal = fetch_signal(
+                market_slug=market.event_slug,
+                condition_id=market.condition_id,
+                mid=mid,
+                minutes_to_resolution=mins_left,
+                pipeline_url=config.seeking_pipeline_url or None,
+                pipeline_file=config.seeking_pipeline_file or None,
+                pipeline_method=config.seeking_pipeline_method,
+                timeout=config.seeking_timeout,
+                use_cache=True,
+                cache_ttl=config.seeking_cache_ttl,
+            )
+            if seeking_signal and seeking_signal.pause:
+                return False
 
-    size = config.order_size
-    if config.anti_snipe_jitter and config.size_jitter_pct > 0:
-        size = _jitter(size, config.size_jitter_pct, True)
-    if depth > 0 and config.depth_scale_threshold > 0:
-        size *= min(1.0, depth / config.depth_scale_threshold)
-    if config.size_scale_near_resolution:
-        size *= get_resolution_size_mult(mins_left, config)
-    if seeking_signal and seeking_signal.size_mult != 1.0:
-        size *= seeking_signal.size_mult
-    main_capital = config.max_total_capital - getattr(config, "aggressive_capital", 0)
-    per_market_cap = main_capital / max(1, config.max_active_markets)
-    size = max(market.min_size, min(size, config.max_position_per_market, per_market_cap))
+        imbalance = book_summary.get("imbalance")
+        tick = float(market.tick_size)
+        if getattr(config, "join_book", False) and book_summary:
+            bb = book_summary.get("best_bid")
+            ba = book_summary.get("best_ask")
+            if bb is not None and ba is not None and 0 < float(bb) < float(ba) < 1:
+                bbf, baf = float(bb), float(ba)
+                spread_ticks = (baf - bbf) / tick
+                improve = getattr(config, "improve_by_one_tick", False) and spread_ticks >= 2.0
+                if improve:
+                    bid = round_to_tick(bbf + tick, market.tick_size)
+                    ask = round_to_tick(baf - tick, market.tick_size)
+                else:
+                    bid = round_to_tick(bbf, market.tick_size)
+                    ask = round_to_tick(baf, market.tick_size)
+                if bid >= ask:
+                    ask = min(0.99, bid + tick)
+            else:
+                bid, ask = None, None
+        else:
+            bid, ask = None, None
+        if bid is None or ask is None:
+            min_spread_bps = max(config.spread_bps, int(tick * 13000))
+            bid, ask = compute_quotes(
+                mid, min_spread_bps, market.tick_size, config, market.condition_id, imbalance, seeking_signal, mins_left
+            )
+        # Tight-spread bonus: 0.5¢ total = 100% quadratic reward score (2026)
+        if getattr(config, "rebate_tight_spread", False):
+            bid = round_to_tick(mid - 0.0025, market.tick_size)
+            ask = round_to_tick(mid + 0.0025, market.tick_size)
+            if bid >= ask:
+                ask = min(0.99, bid + tick)
+        # Inventory skew: lean quotes to reduce position when over $100 or 20% of cap
+        try:
+            positions = estimate_positions(client, [market])
+            pu, pd = positions.get(market.condition_id, (0.0, 0.0))
+            bd, ad = get_inventory_skew(pu, pd, mid, config)
+            if bd != 0 or ad != 0:
+                bid = round_to_tick(bid + bd, market.tick_size)
+                ask = round_to_tick(ask + ad, market.tick_size)
+        except Exception:
+            pass
+        if bid >= ask:
+            return False
 
-    ok = post_two_sided_quotes(client, market, bid, ask, size, config)
-    if ok:
-        _last_quote_ts[market.condition_id] = now
-    if ok and config.secondary_level_enabled:
-        post_secondary_quotes(client, market, mid, config.spread_bps, size, config)
-    if not ok:
-        _market_fail_cooldown[market.condition_id] = now + COOLDOWN_SECONDS
-        return False
+        size = config.order_size
+        if config.anti_snipe_jitter and getattr(config, "size_jitter_pct", 0) > 0:
+            size = _jitter(size, config.size_jitter_pct, True)
+        if depth > 0 and config.depth_scale_threshold > 0:
+            size *= min(1.0, depth / config.depth_scale_threshold)
+        if config.size_scale_near_resolution:
+            size *= get_resolution_size_mult(mins_left, config)
+        if seeking_signal and seeking_signal.size_mult != 1.0:
+            size *= seeking_signal.size_mult
+        per_market_cap = config.max_total_capital / max(1, config.max_active_markets)
+        size = max(market.min_size, min(size, config.max_position_per_market, per_market_cap))
 
-    if config.arb_enabled:
-        cache = books_cache or {market.up_token_id: book_summary}
-        opp, ask_up, ask_down, _ = get_arb_opportunity(client, market, config.arb_taker_min_edge, cache)
-        if opp and ask_up is not None and ask_down is not None:
-            execute_arb_taker(client, market, ask_up, ask_down, min(config.arb_taker_size, size * 0.5), config)
-        if 0.35 <= mid <= 0.65:
-            post_arb_bids(client, market, config, mid=mid)
-    return True
+        # Inventory cap (anti-sweep): if over cap on one side, only quote the reducing side
+        cap_usd = getattr(config, "inventory_cap_usd", 0) or (0.25 * config.max_total_capital)
+        ok = False
+        if cap_usd > 0:
+            try:
+                positions = estimate_positions(client, [market])
+                pu, pd = positions.get(market.condition_id, (0.0, 0.0))
+                notional_up = pu * mid
+                notional_down = pd * (1.0 - mid)
+                if notional_up > cap_usd:
+                    ok = post_sell_order(client, market, market.up_token_id, ask, size, config)
+                    if ok:
+                        logger.info("Inventory cap: ask-only (reduce Up) on %s", market.event_slug[:30])
+                elif notional_down > cap_usd:
+                    ok = post_bid_only(client, market, market.up_token_id, bid, size, config)
+                    if ok:
+                        logger.info("Inventory cap: bid-only (reduce Down) on %s", market.event_slug[:30])
+                else:
+                    ok = post_two_sided_quotes(client, market, bid, ask, size, config)
+            except Exception as e:
+                logger.debug("Inventory/position check failed: %s", e)
+                ok = post_two_sided_quotes(client, market, bid, ask, size, config)
+        else:
+            ok = post_two_sided_quotes(client, market, bid, ask, size, config)
+        if ok:
+            _last_quoted_mid[market.condition_id] = mid  # Only after confirmed post (avoid "shadow" orders)
+            _last_quote_ts[market.condition_id] = now
+        else:
+            _market_fail_cooldown[market.condition_id] = now + COOLDOWN_SECONDS
+            return False
+        return True
+    finally:
+        lock.release()
 
 
 def should_quote_market(market: BTCMarket, config: BotConfig) -> bool:
@@ -271,7 +360,7 @@ def run_market_making_cycle(config: BotConfig) -> None:
     Skips markets with fee-rate 404, uses cooldown for failed markets,
     prioritizes markets with more time to resolution.
     """
-    global _market_fail_cooldown
+    global _market_fail_cooldown, _last_quote_ts, _last_quoted_mid
 
     client = create_client(config, read_only=False)
     if not client:
@@ -314,46 +403,58 @@ def run_market_making_cycle(config: BotConfig) -> None:
     if config.anti_snipe_jitter:
         random.shuffle(markets)
 
+    drift_threshold = getattr(config, "min_midpoint_drift", None)
+    if drift_threshold is None or drift_threshold <= 0:
+        drift_threshold = config.trailing_mid_threshold_bps / 10000
+    min_interval = getattr(config, "min_quote_interval_seconds", MIN_QUOTE_INTERVAL_SECONDS)
+    mid_min = getattr(config, "high_reward_mid_min", 0.30)
+    mid_max = getattr(config, "high_reward_mid_max", 0.70)
+
     for i, market in enumerate(markets):
         if not should_quote_market(market, config):
             continue
-
-        # Skip markets in cooldown (recent failures)
         if market.condition_id in _market_fail_cooldown:
             continue
-
-        # Pre-check fee rate to avoid 404 during order creation
         if not fee_rate_available(client, market.up_token_id):
             logger.debug("Skipping %s (fee rate not available)", market.event_slug[:30])
             _market_fail_cooldown[market.condition_id] = now + COOLDOWN_SECONDS
             continue
 
-        # Cancel existing quotes before posting new ones
-        cancel_market_orders(client, market.condition_id, config)
-
-        # Minimal cancel-post delay (speed mode)
-        if config.anti_snipe_jitter and config.cancel_post_delay_max > 0:
-            delay = random.uniform(config.cancel_post_delay_min, config.cancel_post_delay_max)
-            time.sleep(delay)
-
-        # Midpoint: from batch cache (1 API call) or fallback to API
+        # Get mid first (before any cancel) for drift and high-reward filter
         book_summary = books_cache.get(market.up_token_id)
         mid = mid_from_book_summary(book_summary) if (config.use_book_mid and book_summary) else None
         if mid is None:
             mid = get_midpoint(client, market.up_token_id)
         if mid is None:
             continue
+        # Hot zone: outside [0.30, 0.70] = cancel and skip (rotate off)
+        if mid < mid_min or mid > mid_max:
+            cancel_market_orders(client, market.condition_id, config)
+            continue
+        # Anti-manipulation: use fair price (median of our fills) if book mid is skewed
+        fair = get_fair_price(client, market.event_slug)
+        if fair is not None and abs(mid - fair) > FAIR_PRICE_GAP_THRESHOLD:
+            mid = fair
+        # Time-on-book: don't replace if we quoted recently (Loyalty Multiplier)
+        last_ts = _last_quote_ts.get(market.condition_id, 0)
+        if now - last_ts < min_interval:
+            continue
+        # Drift: don't cancel/replace unless mid moved beyond threshold
+        last = _last_quoted_mid.get(market.condition_id)
+        if last is not None and abs(mid - last) < drift_threshold:
+            continue
+
+        # Cancel-then-post: only post after cancel is confirmed (avoids rate limits)
+        if not cancel_market_orders(client, market.condition_id, config):
+            _market_fail_cooldown[market.condition_id] = now + COOLDOWN_SECONDS
+            continue
+        if getattr(config, "cancel_post_delay_max", 0) > 0:
+            delay = random.uniform(config.cancel_post_delay_min, config.cancel_post_delay_max)
+            time.sleep(delay)
 
         mins_left = _minutes_to_resolution(market)
         record_mid(market.condition_id, mid)
-
-        # Trailing midpoint: don't chase small moves (reduces churn and adverse selection)
-        threshold = config.trailing_mid_threshold_bps / 10000
-        last = _last_quoted_mid.get(market.condition_id, mid)
-        if abs(mid - last) < threshold:
-            mid = last  # Use stale mid; avoid constant reposting
-        else:
-            _last_quoted_mid[market.condition_id] = mid
+        _last_quoted_mid[market.condition_id] = mid
 
         # Thin book: skip markets with very low liquidity (high adverse selection risk)
         depth = (book_summary.get("depth") if book_summary else None) or get_book_depth(client, market.up_token_id)
@@ -381,12 +482,44 @@ def run_market_making_cycle(config: BotConfig) -> None:
 
         imbalance = book_summary.get("imbalance") if book_summary else None
         tick = float(market.tick_size)
-        # Enforce min spread = 1 tick so bid/ask stay distinct after rounding
-        # 0.01 tick needs >0.006 each side (0.505 rounds to 0.50) -> 130 bps min
-        min_spread_bps = max(config.spread_bps, int(tick * 13000))
-        bid, ask = compute_quotes(
-            mid, min_spread_bps, market.tick_size, config, market.condition_id, imbalance, seeking_signal, mins_left
-        )
+        # Join book: at touch or 1 tick inside for queue priority (improve_by_one_tick)
+        if getattr(config, "join_book", False) and book_summary:
+            bb = book_summary.get("best_bid")
+            ba = book_summary.get("best_ask")
+            if bb is not None and ba is not None and 0 < float(bb) < float(ba) < 1:
+                bbf, baf = float(bb), float(ba)
+                spread_ticks = (baf - bbf) / tick
+                improve = getattr(config, "improve_by_one_tick", False) and spread_ticks >= 2.0
+                if improve:
+                    bid = round_to_tick(bbf + tick, market.tick_size)
+                    ask = round_to_tick(baf - tick, market.tick_size)
+                else:
+                    bid = round_to_tick(bbf, market.tick_size)
+                    ask = round_to_tick(baf, market.tick_size)
+                if bid >= ask:
+                    ask = min(0.99, bid + tick)
+        else:
+            bid, ask = None, None
+        if bid is None or ask is None:
+            min_spread_bps = max(config.spread_bps, int(tick * 13000))
+            bid, ask = compute_quotes(
+                mid, min_spread_bps, market.tick_size, config, market.condition_id, imbalance, seeking_signal, mins_left
+            )
+        if getattr(config, "rebate_tight_spread", False):
+            bid = round_to_tick(mid - 0.0025, market.tick_size)
+            ask = round_to_tick(mid + 0.0025, market.tick_size)
+            if bid >= ask:
+                ask = min(0.99, bid + tick)
+        # Inventory skew (REST): lean quotes when position > $100 or 20% of cap
+        try:
+            pos_rest = estimate_positions(client, markets)
+            pu, pd = pos_rest.get(market.condition_id, (0.0, 0.0))
+            bd, ad = get_inventory_skew(pu, pd, mid, config)
+            if bd != 0 or ad != 0:
+                bid = round_to_tick(bid + bd, market.tick_size)
+                ask = round_to_tick(ask + ad, market.tick_size)
+        except Exception:
+            pass
         if bid >= ask:
             continue
 
@@ -401,56 +534,35 @@ def run_market_making_cycle(config: BotConfig) -> None:
         # Granular resolution size scaling (5,4,3,2,1 min thresholds)
         if config.size_scale_near_resolution:
             size *= get_resolution_size_mult(mins_left, config)
-        # Seeking: scale size by pipeline signal
+        # Seeking: scale size by pipeline signal (when enabled)
         if seeking_signal and seeking_signal.size_mult != 1.0:
             size *= seeking_signal.size_mult
-        # Cap by per-market limit and capital budget (reserve aggressive_capital)
-        main_capital = config.max_total_capital - getattr(config, "aggressive_capital", 0)
-        per_market_cap = main_capital / max(1, config.max_active_markets)
+        per_market_cap = config.max_total_capital / max(1, config.max_active_markets)
         size = max(market.min_size, min(size, config.max_position_per_market, per_market_cap))
 
-        ok = post_two_sided_quotes(client, market, bid, ask, size, config)
-        if ok and config.secondary_level_enabled:
-            post_secondary_quotes(client, market, mid, config.spread_bps, size, config)
-        if not ok:
+        cap_usd = getattr(config, "inventory_cap_usd", 0) or (0.25 * config.max_total_capital)
+        if cap_usd > 0:
+            try:
+                positions = estimate_positions(client, markets)
+                pu, pd = positions.get(market.condition_id, (0.0, 0.0))
+                notional_up = pu * mid
+                notional_down = pd * (1.0 - mid)
+                if notional_up > cap_usd:
+                    ok = post_sell_order(client, market, market.up_token_id, ask, size, config)
+                elif notional_down > cap_usd:
+                    ok = post_bid_only(client, market, market.up_token_id, bid, size, config)
+                else:
+                    ok = post_two_sided_quotes(client, market, bid, ask, size, config)
+            except Exception:
+                ok = post_two_sided_quotes(client, market, bid, ask, size, config)
+        else:
+            ok = post_two_sided_quotes(client, market, bid, ask, size, config)
+        if ok:
+            _last_quote_ts[market.condition_id] = now
+        else:
             _market_fail_cooldown[market.condition_id] = now + COOLDOWN_SECONDS
 
-        # Arb: lock-in profit (uses batch cache - no extra API calls)
-        if config.arb_enabled and ok:
-            opp, ask_up, ask_down, combined = get_arb_opportunity(
-                client, market, config.arb_taker_min_edge, books_cache
-            )
-            if opp and ask_up is not None and ask_down is not None:
-                execute_arb_taker(
-                    client, market, ask_up, ask_down,
-                    min(config.arb_taker_size, size * 0.5),
-                    config,
-                )
-            # 2) Arb bids: primary 0.48 + deep 0.47 when mid ~0.5
-            if 0.35 <= mid <= 0.65:
-                post_arb_bids(client, market, config, mid=mid)
-
-        # Anti-snipe: stagger posting to different markets
-        if config.anti_snipe_jitter and i < len(markets) - 1:
+        # Stagger between markets (only if configured > 0)
+        if i < len(markets) - 1 and getattr(config, "market_stagger_max", 0) > 0:
             stagger = random.uniform(config.market_stagger_min, config.market_stagger_max)
             time.sleep(stagger)
-
-    # Resolution pass: one-sided arb exit, arb completion (5–90 sec to resolution)
-    try:
-        resolution_markets = [
-            m for m in all_markets
-            if 5 < _seconds_to_resolution(m) < 90
-        ]
-        if resolution_markets:
-            positions = estimate_positions(client, resolution_markets)
-            for m in resolution_markets:
-                pos = positions.get(m.condition_id, (0, 0))
-                if pos[0] == 0 and pos[1] == 0:
-                    continue
-                mid = get_midpoint(client, m.up_token_id)
-                if mid is None:
-                    continue
-                try_one_sided_arb_exit(client, m, pos[0], pos[1], mid, config)
-                try_arb_completion(client, m, pos[0], pos[1], config)
-    except Exception as e:
-        logger.debug("Resolution pass: %s", e)

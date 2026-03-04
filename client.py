@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
+import requests
 from py_clob_client.client import ClobClient
 from py_clob_client.exceptions import PolyApiException
 from py_clob_client.clob_types import BookParams, OrderArgs, OrderType, PostOrdersArgs, PartialCreateOrderOptions
@@ -208,8 +209,9 @@ def post_two_sided_quotes(
         if use_gtd:
             bid_kw["expiration"] = exp_ts
 
-        # Polymarket prediction markets use neg_risk=True (avoids 404 on some tokens)
-        opts = PartialCreateOrderOptions(neg_risk=True)
+        # Per-token neg_risk from API (required for btc-updown; wrong value → "Invalid Signature")
+        neg_risk = client.get_neg_risk(market.up_token_id)
+        opts = PartialCreateOrderOptions(neg_risk=neg_risk)
         bid_order = client.create_order(OrderArgs(**bid_kw), opts)
         orders.append(
             PostOrdersArgs(
@@ -227,7 +229,7 @@ def post_two_sided_quotes(
         if use_gtd:
             ask_kw["expiration"] = exp_ts
 
-        ask_order = client.create_order(OrderArgs(**ask_kw), opts)
+        ask_order = client.create_order(OrderArgs(**ask_kw), opts)  # same token, same neg_risk
         orders.append(
             PostOrdersArgs(
                 order=ask_order,
@@ -235,7 +237,12 @@ def post_two_sided_quotes(
             )
         )
 
-        resp = client.post_orders(orders)
+        try:
+            resp = client.post_orders(orders)
+        except requests.exceptions.RequestException as e:
+            logger.warning("Request exception on post (connection/reset), cooling off %ds: %s", REQUEST_COOLOFF_SECONDS, e)
+            time.sleep(REQUEST_COOLOFF_SECONDS)
+            raise
         if isinstance(resp, list) and len(resp) > 0:
             # Batch endpoint returns list; check for invalid signature or other errors
             has_err = any(
@@ -274,13 +281,16 @@ def post_secondary_quotes(
     Post secondary level: wider spread (spread_mult × spread_bps), smaller size (size_mult × size).
     More fill opportunities without over-exposing.
     """
-    if not config.secondary_level_enabled or config.secondary_size_mult <= 0:
+    if not getattr(config, "secondary_level_enabled", False) or getattr(config, "secondary_size_mult", 0) <= 0:
         return True
     half = (spread_bps * config.secondary_spread_mult / 10000) / 2
     bid = max(0.01, mid - half)
     ask = min(0.99, mid + half)
     sec_size = size * config.secondary_size_mult
     return post_two_sided_quotes(client, market, bid, ask, sec_size, config)
+
+
+REQUEST_COOLOFF_SECONDS = 2  # Sleep on connection/request errors so connection can reset
 
 
 def cancel_market_orders(client: ClobClient, condition_id: str, config: BotConfig) -> bool:
@@ -291,6 +301,10 @@ def cancel_market_orders(client: ClobClient, condition_id: str, config: BotConfi
     try:
         client.cancel_market_orders(market=condition_id)
         return True
+    except requests.exceptions.RequestException as e:
+        logger.warning("Request exception on cancel (connection/reset), cooling off %ds: %s", REQUEST_COOLOFF_SECONDS, e)
+        time.sleep(REQUEST_COOLOFF_SECONDS)
+        return False
     except Exception as e:
         logger.error("Failed to cancel orders: %s", e)
         return False
@@ -440,7 +454,8 @@ def post_sell_order(
     exp_ts = _market_expiration_ts(market, buffer_sec)
     use_gtd = exp_ts is not None and exp_ts > int(datetime.now(timezone.utc).timestamp())
     try:
-        opts = PartialCreateOrderOptions(neg_risk=True)
+        neg_risk = client.get_neg_risk(token_id)
+        opts = PartialCreateOrderOptions(neg_risk=neg_risk)
         ask_kw = dict(token_id=token_id, side=SELL, price=price, size=size)
         if use_gtd:
             ask_kw["expiration"] = exp_ts
@@ -473,7 +488,8 @@ def post_bid_only(
     exp_ts = _market_expiration_ts(market, buffer_sec)
     use_gtd = exp_ts is not None and exp_ts > int(datetime.now(timezone.utc).timestamp())
     try:
-        opts = PartialCreateOrderOptions(neg_risk=True)
+        neg_risk = client.get_neg_risk(token_id)
+        opts = PartialCreateOrderOptions(neg_risk=neg_risk)
         bid_kw = dict(token_id=token_id, side=BUY, price=price, size=size)
         if use_gtd:
             bid_kw["expiration"] = exp_ts
@@ -484,92 +500,6 @@ def post_bid_only(
         return False
     except Exception as e:
         logger.debug("Failed to post arb bid: %s", e)
-        return False
-
-
-def get_arb_opportunity(
-    client: ClobClient,
-    market: BTCMarket,
-    min_edge: float = 0.015,
-    books_cache: Optional[dict] = None,
-) -> tuple[bool, Optional[float], Optional[float], Optional[float]]:
-    """
-    Check if arb exists: best_ask(Up) + best_ask(Down) < (1 - min_edge).
-    Returns (opportunity_exists, ask_up, ask_down, combined_cost).
-    If books_cache provided, uses cached best_ask (avoids 2 API calls).
-    """
-    if books_cache:
-        bu = books_cache.get(market.up_token_id)
-        bd = books_cache.get(market.down_token_id)
-        ask_up = float(bu["best_ask"]) if bu and bu.get("best_ask") else None
-        ask_down = float(bd["best_ask"]) if bd and bd.get("best_ask") else None
-    else:
-        ask_up = get_best_ask(client, market.up_token_id)
-        ask_down = get_best_ask(client, market.down_token_id)
-    if ask_up is None or ask_down is None:
-        return False, ask_up, ask_down, None
-    combined = ask_up + ask_down
-    threshold = 1.0 - min_edge
-    return combined < threshold, ask_up, ask_down, combined
-
-
-def post_arb_bids(client: ClobClient, market: BTCMarket, config: BotConfig, mid: Optional[float] = None) -> bool:
-    """
-    Post arb bids: primary at arb_bid_price (4%), deep at arb_bid_price_deep (6%) when mid ~0.5.
-    Aggressive tier (uses aggressive_capital): deeper bids at aggressive_arb_bid_price (12% edge).
-    If both sides fill, lock in profit.
-    """
-    if not config.arb_enabled:
-        return False
-    ok = True
-    if config.arb_size > 0:
-        price = config.arb_bid_price
-        size = config.arb_size
-        ok1 = post_bid_only(client, market, market.up_token_id, price, size, config)
-        ok2 = post_bid_only(client, market, market.down_token_id, price, size, config)
-        ok = ok1 and ok2
-    # Deep arb (0.47): 6% profit when both fill; only when mid in range
-    if mid is not None and 0.35 <= mid <= 0.65 and config.arb_size_deep > 0:
-        price_deep = getattr(config, "arb_bid_price_deep", 0.47)
-        size_deep = getattr(config, "arb_size_deep", 4.0)
-        post_bid_only(client, market, market.up_token_id, price_deep, size_deep, config)
-        post_bid_only(client, market, market.down_token_id, price_deep, size_deep, config)
-    # Aggressive tier ($12): deeper bids for higher edge, more risky (less fill probability)
-    agg_cap = getattr(config, "aggressive_capital", 0)
-    agg_size = getattr(config, "aggressive_arb_size", 0)
-    agg_price = getattr(config, "aggressive_arb_bid_price", 0.44)
-    if mid is not None and 0.35 <= mid <= 0.65 and agg_cap > 0 and agg_size > 0:
-        post_bid_only(client, market, market.up_token_id, agg_price, agg_size, config)
-        post_bid_only(client, market, market.down_token_id, agg_price, agg_size, config)
-        logger.info("Aggressive arb bids: %.2f @ %.2f (12%% edge pool)", agg_size, agg_price)
-    return ok
-
-
-def execute_arb_taker(
-    client: ClobClient,
-    market: BTCMarket,
-    ask_up: float,
-    ask_down: float,
-    size: float,
-    config: BotConfig,
-) -> bool:
-    """
-    Execute arb by taking both sides at ask prices (taker - pays fees, but locks in edge).
-    Uses aggressive limit orders at ask price to cross the spread.
-    """
-    if config.dry_run:
-        logger.info("[DRY RUN] Would execute arb taker: buy Up@%.3f Down@%.3f size %.0f", ask_up, ask_down, size)
-        return True
-    try:
-        # Place two limit buy orders at ask prices (we cross = taker)
-        ok1 = post_bid_only(client, market, market.up_token_id, ask_up, size, config)
-        ok2 = post_bid_only(client, market, market.down_token_id, ask_down, size, config)
-        if ok1 and ok2:
-            logger.info("Arb taker: bought Up@%.3f Down@%.3f (combined %.3f) size %.0f",
-                        ask_up, ask_down, ask_up + ask_down, size)
-        return ok1 and ok2
-    except Exception as e:
-        logger.warning("Arb taker failed: %s", e)
         return False
 
 

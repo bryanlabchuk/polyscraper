@@ -4,12 +4,22 @@ Adaptive algorithms for the market maker.
 - Resolution-aware: spread widen and size scaling as resolution approaches
 - Momentum skew: skew quotes toward recent price direction
 - Volatility scaling: continuous spread adjustment based on mid range
+- Fair price: VWAP/median of recent fills (anti-manipulation vs book midpoint)
+- Inventory skew: lean quotes to reduce position when over cap
 """
 
 from collections import deque
-from typing import Optional
+from typing import Optional, Tuple
 
 from config import BotConfig
+
+# Gap between book mid and fair price above which we use fair price (anti-manipulation)
+FAIR_PRICE_GAP_THRESHOLD = 0.01
+# Inventory skew amount per side when over cap ($)
+INVENTORY_SKEW_AMOUNT = 0.001
+# Position notional above which we apply inventory skew: $100 or 20% of cap
+INVENTORY_SKEW_CAP_USD = 100.0
+INVENTORY_SKEW_CAP_PCT = 0.20
 
 # Midpoint history: condition_id -> deque of (ts, mid) for momentum/volatility
 _midpoint_history: dict[str, deque] = {}
@@ -109,3 +119,60 @@ def get_volatility_extra_bps(condition_id: str, mid: float, config: BotConfig) -
     if r > 0.01:
         return int(config.volatility_spread_extra_bps * 0.5)
     return 0
+
+
+def get_fair_price(client, market_slug: str, max_trades: int = 10) -> Optional[float]:
+    """
+    Anti-manipulation: fair price from our recent fills (median of last N trades).
+    If book midpoint is skewed by fake walls (e.g. 12k at 0.01), we use this instead.
+    Returns None if insufficient trades.
+    """
+    try:
+        trades = client.get_trades(params=None) or []
+    except Exception:
+        return None
+    collected = []
+    for t in trades:
+        slug = t.get("eventSlug") or t.get("slug") or ""
+        if slug != market_slug:
+            continue
+        p = t.get("price")
+        ts = t.get("timestamp")
+        if p is not None:
+            try:
+                ts_val = int(ts) if ts is not None else 0
+                collected.append((ts_val, float(p)))
+            except (TypeError, ValueError):
+                continue
+    if len(collected) < 2:
+        return None
+    # Sort by timestamp descending (newest first), take last N, median of prices
+    collected.sort(key=lambda x: -x[0])
+    recent_prices = [p for _, p in collected[:max_trades]]
+    recent_prices.sort()
+    n = len(recent_prices)
+    if n % 2 == 1:
+        return recent_prices[n // 2]
+    return (recent_prices[n // 2 - 1] + recent_prices[n // 2]) / 2.0
+
+
+def get_inventory_skew(
+    position_up: float,
+    position_down: float,
+    mid: float,
+    config: BotConfig,
+) -> Tuple[float, float]:
+    """
+    Inventory-aware skew: (bid_delta, ask_delta) when position exceeds $100 or 20% of cap.
+    Long Up -> lower ask (sell more), raise bid slightly. Long Down -> raise bid (buy Up to reduce).
+    """
+    cap_usd = max(INVENTORY_SKEW_CAP_USD, config.max_total_capital * INVENTORY_SKEW_CAP_PCT)
+    notional_up = position_up * mid
+    notional_down = position_down * (1.0 - mid)
+    if notional_up > cap_usd:
+        # Long Up: encourage selling Up -> lower ask, raise bid (narrow spread toward selling)
+        return (INVENTORY_SKEW_AMOUNT, -INVENTORY_SKEW_AMOUNT)
+    if notional_down > cap_usd:
+        # Long Down: encourage buying Up (reduce Down) -> more aggressive bid
+        return (INVENTORY_SKEW_AMOUNT, INVENTORY_SKEW_AMOUNT)
+    return (0.0, 0.0)

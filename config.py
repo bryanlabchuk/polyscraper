@@ -16,83 +16,67 @@ class BotConfig:
     gamma_host: str = "https://gamma-api.polymarket.com"
     chain_id: int = 137  # Polygon
 
-    # Wallet
+    # Wallet (SIGNATURE_TYPE=2 if using delegated/auth that is working)
     private_key: str = ""
     funder: str = ""
-    signature_type: int = 0  # 0=EOA, 1=Magic/email
+    signature_type: int = 0  # 0=EOA, 1=Magic/email, 2=delegated (keep if auth works)
 
-    # Market maker params ($150 USDC.e - tuned for time-on-book and maker rebates)
-    spread_bps: int = 120  # 0.01 tick needs >100 bps; 120 = 0.6% each side for valid bid<ask
-    order_size: float = 50.0  # Larger size = better book priority
-    max_position_per_market: float = 50.0  # Max exposure per market
-    max_total_capital: float = 150.0  # Total capital
-    max_active_markets: int = 2  # Concentrate capital for better priority
-    quote_refresh_seconds: int = 15  # Seconds between cycles; 0 = fastest (higher risk of rate limit)
-    min_quote_interval_seconds: float = 2.5  # WS: min seconds between quote updates per market (let orders get filled)
-    minutes_before_resolution_to_stop: int = 2  # 3x more trading time vs 4 min stop
+    # Market maker params — 2026 rebate: tight spread + time-on-book
+    spread_bps: int = 50  # 0.5¢ total spread (Mid±0.0025) for maker rebate zone
+    order_size: float = 50.0  # Size at touch (larger = more queue priority)
+    max_position_per_market: float = 50.0
+    max_total_capital: float = 150.0
+    max_active_markets: int = 2
+    quote_refresh_seconds: int = 5  # Fast cycle (REST); use main_ws.py for event-driven
+    min_quote_interval_seconds: float = 10.0  # 10s time-on-book for 2026 Loyalty Multiplier
+    minutes_before_resolution_to_stop: int = 1  # Stay in longer, more risk
 
     # BTC 5m market discovery
     btc_5m_series_slug: str = "btc-up-or-down-5m"
     btc_5m_slug_prefix: str = "btc-updown-5m"
+    # Hot zone: only quote when mid in [0.30, 0.70]; outside = cancel and rotate off (fee-curve peak ~0.50)
+    high_reward_mid_min: float = 0.30
+    high_reward_mid_max: float = 0.70
+    # Tight-spread bonus: 0.5¢ total (mid ± 0.0025) = 100% quadratic reward score
+    rebate_tight_spread: bool = True
 
     # Safety
     dry_run: bool = False
-
-    # Arb / lock-in profit: buy both Up and Down at low prices for guaranteed payout
-    arb_enabled: bool = True
-    arb_bid_price: float = 0.485  # Tighter arb = more frequent fills (0.97 cost, $1 payout)
-    arb_size: float = 6.0  # Smaller arb size (one-sided fill = directional risk)
-    arb_bid_price_deep: float = 0.47
-    arb_size_deep: float = 2.0  # Deep arb smaller
-
-    # Aggressive capital ($12): riskier but structured plays (deeper arb, bolder resolution)
-    aggressive_capital: float = 12.0  # Slice of max_total for higher-risk activity
-    aggressive_arb_bid_price: float = 0.44  # Deeper bids: 12% edge if both fill
-    aggressive_arb_size: float = 4.0  # Size for aggressive tier (capped by aggressive_capital)
-    arb_taker_min_edge: float = 0.012  # 1.2% min edge for taker arb
-    arb_taker_size: float = 10.0  # Taker arb size
-
-    # Resolution-phase actions (low risk)
-    arb_exit_enabled: bool = True  # Sell one-sided loser when clearly losing, < 60s left
-    arb_exit_size: float = 5.0
-    arb_completion_enabled: bool = True  # Buy cheap other side to complete arb, < 45s left
-    arb_completion_size: float = 3.0
-    # Aggressive resolution (uses aggressive_capital): bolder thresholds
-    aggressive_arb_completion_ask_max: float = 0.08  # Complete arb if ask < 8c (vs 6c)
-    aggressive_arb_completion_size: float = 5.0  # Slightly larger completion size
-
-    # Secondary quote level: disabled by default (was increasing adverse selection)
-    secondary_level_enabled: bool = False
-    secondary_spread_mult: float = 1.5  # 1.5× main spread
-    secondary_size_mult: float = 0.4  # 40% of main size
 
     # Adaptive algorithms
     adaptive_momentum_skew: bool = True  # Skew toward recent price direction
     resolution_spread_widen: bool = True  # Widen spread in last minutes
 
     # Order-book-based pricing
-    use_book_mid: bool = True  # Use (best_bid+best_ask)/2 when valid
-    imbalance_skew_bps: int = 20  # Max skew from book imbalance (e.g. 20 = ±0.2%)
-    trailing_mid_threshold_bps: int = 30  # Don't update quotes until mid moves 0.3%
+    use_book_mid: bool = True
+    join_book: bool = True  # Quote at touch (or 1 tick inside with improve_by_one_tick)
+    improve_by_one_tick: bool = True  # When join_book: bid+1tick, ask-1tick for queue priority
+    imbalance_skew_bps: int = 20
+    # Drift: don't cancel/replace unless mid moves beyond this (build time-on-book for rebates)
+    min_midpoint_drift: float = 0.0025  # 0.25¢; only update if price moves more (stay on book)
+    trailing_mid_threshold_bps: int = 20  # Fallback: 0.2% when min_midpoint_drift not set
     depth_scale_threshold: float = 40.0  # Scale size down when book depth < this
 
-    # Risk controls (stricter with larger size)
-    volatility_spread_extra_bps: int = 25  # Widen more when volatile
-    min_book_depth: float = 25.0  # Require deeper books for larger orders
-    size_scale_near_resolution: bool = True  # Reduce order size when < 4 min to resolution
+    # Risk controls
+    volatility_spread_extra_bps: int = 15  # Less widen = stay tighter
+    min_book_depth: float = 15.0  # Accept thinner books for speed
+    size_scale_near_resolution: bool = True
+    # Inventory cap (anti-sweep): max notional per side; over cap = quote only reducing side
+    inventory_cap_usd: float = 0.0  # 0 = use 25% of max_total_capital
+    rebates_poll_interval_seconds: int = 3600  # Log rebated_fees_usdc from API (hourly)
 
-    # Anti-snipe / anti-predictability (makes strategy harder to exploit)
-    anti_snipe_jitter: bool = True  # Enable spread, size, timing jitter
-    spread_jitter_pct: int = 15  # Max ±% random on spread (e.g. 15 = ±15%)
-    size_jitter_pct: int = 10  # Max ±% random on order size
-    cancel_post_delay_min: float = 0.0  # Speed: minimal delay
-    cancel_post_delay_max: float = 0.03  # Max 30ms between cancel and post
-    market_stagger_min: float = 0.01  # Min 10ms between markets
-    market_stagger_max: float = 0.06  # Max 60ms between markets
-    cycle_jitter_seconds: int = 2
+    # Speed: minimal jitter and delays for max reactivity
+    anti_snipe_jitter: bool = False  # Off = no random delay, deterministic speed
+    spread_jitter_pct: int = 0
+    size_jitter_pct: int = 0
+    cancel_post_delay_min: float = 0.0
+    cancel_post_delay_max: float = 0.0  # Zero delay between cancel and post
+    market_stagger_min: float = 0.0  # No delay between markets
+    market_stagger_max: float = 0.0
+    cycle_jitter_seconds: int = 0  # Fixed cycle, no random wait
 
-    # Seeking: connect to external data pipelines for analysis-driven signals
-    seeking_enabled: bool = True
+    # Seeking: external signals (optional; off by default for pure MM)
+    seeking_enabled: bool = False
     seeking_pipeline_url: str = ""  # e.g. http://localhost:8000/signal
     seeking_pipeline_file: str = ""  # e.g. ./signals.json (written by your analysis)
     seeking_pipeline_method: str = "POST"  # GET or POST
@@ -119,34 +103,21 @@ class BotConfig:
         self.minutes_before_resolution_to_stop = int(
             os.getenv("MINUTES_BEFORE_RESOLUTION_TO_STOP", str(self.minutes_before_resolution_to_stop))
         )
-        self.arb_enabled = os.getenv("ARB_ENABLED", "true").lower() in ("true", "1", "yes")
-        self.arb_bid_price = float(os.getenv("ARB_BID_PRICE", str(self.arb_bid_price)))
-        self.arb_size = float(os.getenv("ARB_SIZE", str(self.arb_size)))
-        self.arb_bid_price_deep = float(os.getenv("ARB_BID_PRICE_DEEP", str(self.arb_bid_price_deep)))
-        self.arb_size_deep = float(os.getenv("ARB_SIZE_DEEP", str(self.arb_size_deep)))
-        self.aggressive_capital = float(os.getenv("AGGRESSIVE_CAPITAL", str(self.aggressive_capital)))
-        self.aggressive_arb_bid_price = float(os.getenv("AGGRESSIVE_ARB_BID_PRICE", str(self.aggressive_arb_bid_price)))
-        self.aggressive_arb_size = float(os.getenv("AGGRESSIVE_ARB_SIZE", str(self.aggressive_arb_size)))
-        self.aggressive_arb_completion_ask_max = float(
-            os.getenv("AGGRESSIVE_ARB_COMPLETION_ASK_MAX", str(self.aggressive_arb_completion_ask_max))
-        )
-        self.aggressive_arb_completion_size = float(
-            os.getenv("AGGRESSIVE_ARB_COMPLETION_SIZE", str(self.aggressive_arb_completion_size))
-        )
-        self.arb_taker_min_edge = float(os.getenv("ARB_TAKER_MIN_EDGE", str(self.arb_taker_min_edge)))
-        self.arb_taker_size = float(os.getenv("ARB_TAKER_SIZE", str(self.arb_taker_size)))
-        self.arb_exit_enabled = os.getenv("ARB_EXIT_ENABLED", "true").lower() in ("true", "1", "yes")
-        self.arb_exit_size = float(os.getenv("ARB_EXIT_SIZE", str(self.arb_exit_size)))
-        self.arb_completion_enabled = os.getenv("ARB_COMPLETION_ENABLED", "true").lower() in ("true", "1", "yes")
-        self.arb_completion_size = float(os.getenv("ARB_COMPLETION_SIZE", str(self.arb_completion_size)))
-        self.secondary_level_enabled = os.getenv("SECONDARY_LEVEL_ENABLED", "true").lower() in ("true", "1", "yes")
-        self.secondary_spread_mult = float(os.getenv("SECONDARY_SPREAD_MULT", str(self.secondary_spread_mult)))
-        self.secondary_size_mult = float(os.getenv("SECONDARY_SIZE_MULT", str(self.secondary_size_mult)))
         self.adaptive_momentum_skew = os.getenv("ADAPTIVE_MOMENTUM_SKEW", "true").lower() in ("true", "1", "yes")
         self.resolution_spread_widen = os.getenv("RESOLUTION_SPREAD_WIDEN", "true").lower() in ("true", "1", "yes")
         self.use_book_mid = os.getenv("USE_BOOK_MID", "true").lower() in ("true", "1", "yes")
+        self.join_book = os.getenv("JOIN_BOOK", "true").lower() in ("true", "1", "yes")
+        self.improve_by_one_tick = os.getenv("IMPROVE_BY_ONE_TICK", "true").lower() in ("true", "1", "yes")
         self.imbalance_skew_bps = int(os.getenv("IMBALANCE_SKEW_BPS", str(self.imbalance_skew_bps)))
+        self.min_midpoint_drift = float(os.getenv("MIN_MIDPOINT_DRIFT", str(self.min_midpoint_drift)))
         self.trailing_mid_threshold_bps = int(os.getenv("TRAILING_MID_THRESHOLD_BPS", str(self.trailing_mid_threshold_bps)))
+        self.high_reward_mid_min = float(os.getenv("HIGH_REWARD_MID_MIN", str(self.high_reward_mid_min)))
+        self.high_reward_mid_max = float(os.getenv("HIGH_REWARD_MID_MAX", str(self.high_reward_mid_max)))
+        self.rebate_tight_spread = os.getenv("REBATE_TIGHT_SPREAD", "true").lower() in ("true", "1", "yes")
+        self.rebates_poll_interval_seconds = int(os.getenv("REBATES_POLL_INTERVAL_SECONDS", str(self.rebates_poll_interval_seconds)))
+        self.inventory_cap_usd = float(os.getenv("INVENTORY_CAP_USD", str(self.inventory_cap_usd)))
+        if self.inventory_cap_usd <= 0:
+            self.inventory_cap_usd = 0.25 * self.max_total_capital
         self.depth_scale_threshold = float(os.getenv("DEPTH_SCALE_THRESHOLD", str(self.depth_scale_threshold)))
         self.volatility_spread_extra_bps = int(
             os.getenv("VOLATILITY_SPREAD_EXTRA_BPS", str(self.volatility_spread_extra_bps))
@@ -163,7 +134,7 @@ class BotConfig:
         self.market_stagger_min = float(os.getenv("MARKET_STAGGER_MIN", str(self.market_stagger_min)))
         self.market_stagger_max = float(os.getenv("MARKET_STAGGER_MAX", str(self.market_stagger_max)))
         self.cycle_jitter_seconds = int(os.getenv("CYCLE_JITTER_SECONDS", str(self.cycle_jitter_seconds)))
-        self.seeking_enabled = os.getenv("SEEKING_ENABLED", "true").lower() in ("true", "1", "yes")
+        self.seeking_enabled = os.getenv("SEEKING_ENABLED", "false").lower() in ("true", "1", "yes")
         self.seeking_pipeline_url = os.getenv("SEEKING_PIPELINE_URL", self.seeking_pipeline_url).strip()
         self.seeking_pipeline_file = os.getenv("SEEKING_PIPELINE_FILE", self.seeking_pipeline_file).strip()
         self.seeking_pipeline_method = os.getenv("SEEKING_PIPELINE_METHOD", self.seeking_pipeline_method).upper() or "POST"

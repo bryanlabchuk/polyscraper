@@ -98,5 +98,5 @@ def log_fills(client) -> int:
         return 0
 
     if new_count > 0:
-        logger.debug("Logged %d new fill(s) to %s", new_count, FILLS_LOG)
+        logger.info("Fill(s): %d new trade(s) | %s", new_count, FILLS_LOG.name)
     return new_count
