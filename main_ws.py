@@ -16,7 +16,7 @@ import sys
 import time
 
 from config import BotConfig
-from client import create_client, cancel_all_orders, count_open_orders
+from client import create_client, cancel_all_orders, count_open_orders, get_order_books_batch, mid_from_book_summary
 from markets import BTCMarket, fetch_btc_5m_markets
 from strategy import run_single_market_quote, run_market_making_cycle, _minutes_to_resolution
 from fill_logger import log_fills
@@ -35,7 +35,8 @@ _shutdown = False
 _ws_client_ref = None  # Set when running for legacy signal handler
 MARKET_REFRESH_SECONDS = 300  # 5 min
 HEARTBEAT_LOG_SECONDS = 30  # Log alive status every N seconds
-WS_WATCHDOG_TIMEOUT = 7  # If no price_update/heartbeat for this long, cancel all and reconnect
+WS_WATCHDOG_TIMEOUT = 10  # Miss heartbeat twice (2×5s) then cancel and halt
+WS_WATCHDOG_HALT_SECONDS = 30  # Halt before reconnect to prevent ghost trading
 WS_WATCHDOG_CHECK_INTERVAL = 2  # Check every 2s
 
 
@@ -48,13 +49,28 @@ def _build_token_to_market(markets: list[BTCMarket]) -> dict[str, BTCMarket]:
     return out
 
 
-def _refresh_markets(config: BotConfig) -> tuple[list[BTCMarket], list[str]]:
-    """Fetch markets and return (markets, all_token_ids)."""
+def _refresh_markets(config: BotConfig, client=None) -> tuple[list[BTCMarket], list[str]]:
+    """Fetch markets; if client given, prioritize by rebate (closest to $0.50 first)."""
     markets = fetch_btc_5m_markets(config)
     if not markets:
         return [], []
-    all_markets = sorted(markets, key=lambda m: _minutes_to_resolution(m), reverse=True)
-    active = all_markets[: config.max_active_markets]
+    if client:
+        try:
+            token_ids = list(dict.fromkeys(m.up_token_id for m in markets[:10]))
+            books = get_order_books_batch(client, token_ids)
+            def mid_for(m: BTCMarket) -> float:
+                s = books.get(m.up_token_id) if books else None
+                mid = mid_from_book_summary(s) if s else None
+                return mid if mid is not None else 0.5
+            with_mid = [(m, mid_for(m)) for m in markets]
+            with_mid.sort(key=lambda x: abs(x[1] - 0.50))
+            active = [m for m, _ in with_mid[: config.max_active_markets]]
+        except Exception:
+            all_markets = sorted(markets, key=lambda m: _minutes_to_resolution(m), reverse=True)
+            active = all_markets[: config.max_active_markets]
+    else:
+        all_markets = sorted(markets, key=lambda m: _minutes_to_resolution(m), reverse=True)
+        active = all_markets[: config.max_active_markets]
     token_ids = list(dict.fromkeys(t for m in active for t in [m.up_token_id, m.down_token_id]))
     return active, token_ids
 
@@ -63,14 +79,15 @@ async def _market_refresh_loop(
     ws_client: WSClient,
     token_to_market: dict[str, BTCMarket],
     config: BotConfig,
+    client,
 ) -> None:
-    """Periodically refresh markets and update WS subscription."""
+    """Periodically refresh markets and update WS subscription (rebate-priority when client set)."""
     while not _shutdown:
         await asyncio.sleep(MARKET_REFRESH_SECONDS)
         if _shutdown:
             break
         try:
-            markets, token_ids = _refresh_markets(config)
+            markets, token_ids = _refresh_markets(config, client)
             if not token_ids:
                 continue
             mapping = _build_token_to_market(markets)
@@ -126,27 +143,45 @@ async def main_async() -> None:
     except Exception:
         pass
 
-    markets, token_ids = _refresh_markets(config)
+    markets, token_ids = _refresh_markets(config, client)
     if not token_ids:
         logger.info("No active BTC 5m markets found")
         return
 
     token_to_market = _build_token_to_market(markets)
     books_cache: dict[str, dict] = {}
+    price_update_queue: asyncio.Queue = asyncio.Queue()
 
     def on_price_update(asset_id: str, mid: float, book_summary: dict) -> None:
+        """Enqueue only; consumer processes in strict order (no thread collision)."""
+        try:
+            price_update_queue.put_nowait((asset_id, mid, book_summary))
+        except asyncio.QueueFull:
+            pass
+
+    async def _price_update_consumer() -> None:
+        """Single consumer: process price updates one at a time to eliminate race conditions."""
         loop = asyncio.get_running_loop()
-        loop.run_in_executor(
-            None,
-            _on_price_update_sync,
-            client,
-            token_to_market,
-            config,
-            books_cache,
-            asset_id,
-            mid,
-            book_summary,
-        )
+        while not _shutdown:
+            try:
+                item = await asyncio.wait_for(price_update_queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            asset_id, mid, book_summary = item
+            try:
+                await loop.run_in_executor(
+                    None,
+                    _on_price_update_sync,
+                    client,
+                    token_to_market,
+                    config,
+                    books_cache,
+                    asset_id,
+                    mid,
+                    book_summary,
+                )
+            except Exception as e:
+                logger.debug("Price update consumer error: %s", e)
 
     ws_client = WSClient(
         asset_ids=token_ids,
@@ -236,29 +271,31 @@ async def main_async() -> None:
     reconnect_requested = [False]  # Watchdog sets to True to trigger reconnect
 
     async def _watchdog_loop() -> None:
-        """If no WS activity for 7s, cancel all orders and request reconnect (Montreal brick)."""
+        """If heartbeat missed twice (10s), cancel all, halt 30s, then reconnect (Montreal brick)."""
         while not _shutdown:
             await asyncio.sleep(WS_WATCHDOG_CHECK_INTERVAL)
             if _shutdown:
                 break
             ts = getattr(ws_client, "last_activity_ts", 0) or 0
             if ts > 0 and (time.time() - ts) > WS_WATCHDOG_TIMEOUT:
-                logger.warning("Watchdog: no WS activity for %ds, cancelling orders and reconnecting...", WS_WATCHDOG_TIMEOUT)
+                logger.warning("Watchdog: no WS activity for %ds, cancelling orders and halting %ds...", WS_WATCHDOG_TIMEOUT, WS_WATCHDOG_HALT_SECONDS)
                 try:
                     loop = asyncio.get_running_loop()
                     await loop.run_in_executor(None, lambda: cancel_all_orders(client, config))
                 except Exception as e:
                     logger.error("Watchdog cancel_all failed: %s", e)
+                await asyncio.sleep(WS_WATCHDOG_HALT_SECONDS)
                 reconnect_requested[0] = True
                 ws_client.stop()
                 return
 
     while not _shutdown:
-        refresh_task = asyncio.create_task(_market_refresh_loop(ws_client, token_to_market, config))
+        refresh_task = asyncio.create_task(_market_refresh_loop(ws_client, token_to_market, config, client))
         heartbeat_task = asyncio.create_task(_heartbeat_log_loop())
         ws_task = asyncio.create_task(ws_client.run())
         watchdog_task = asyncio.create_task(_watchdog_loop())
-        tasks = [refresh_task, heartbeat_task, ws_task, watchdog_task]
+        consumer_task = asyncio.create_task(_price_update_consumer())
+        tasks = [refresh_task, heartbeat_task, ws_task, watchdog_task, consumer_task]
         if maker_address and getattr(config, "rebates_poll_interval_seconds", 0) > 0:
             tasks.append(asyncio.create_task(_rebates_poll_loop()))
 
