@@ -35,7 +35,7 @@ _shutdown = False
 _ws_client_ref = None  # Set when running for legacy signal handler
 MARKET_REFRESH_SECONDS = 300  # 5 min
 HEARTBEAT_LOG_SECONDS = 30  # Log alive status every N seconds
-WS_WATCHDOG_TIMEOUT = 10  # Miss heartbeat twice (2×5s) then cancel and halt
+WS_WATCHDOG_TIMEOUT = 10  # Last-Mile Watchdog: no price update 10s → cancel, reconnect
 WS_WATCHDOG_HALT_SECONDS = 30  # Halt before reconnect to prevent ghost trading
 WS_WATCHDOG_CHECK_INTERVAL = 2  # Check every 2s
 
@@ -197,6 +197,38 @@ async def main_async() -> None:
         len(token_ids),
     )
 
+    # Auto-scale from wallet USDC: size order_size, max_position_per_market, max_total_capital by balance
+    if getattr(config, "auto_scale_from_balance", True):
+        try:
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.COLLATERAL,
+                signature_type=config.signature_type,
+            )
+            bal_resp = client.get_balance_allowance(params)
+            raw = (
+                float(bal_resp.get("balance") or bal_resp.get("currentBalance") or 0)
+                if isinstance(bal_resp, dict)
+                else float(getattr(bal_resp, "balance", 0) or 0)
+            )
+            balance_usdc = raw / 1e6 if raw > 1e4 else raw
+            if balance_usdc > 10:
+                effective = balance_usdc * 0.85
+                n = max(1, config.max_active_markets)
+                per_market = effective / n
+                order_cap = max(5, min(config.order_size, per_market * 0.2))
+                pos_cap = max(10, min(config.max_position_per_market, per_market * 0.5))
+                config.max_total_capital = effective
+                config.max_position_per_market = pos_cap
+                config.order_size = order_cap
+                config.inventory_cap_usd = effective * 0.25
+                logger.info(
+                    "Auto-scale from $%.1f USDC: order_size=$%.1f max_pos=$%.1f max_total=$%.1f",
+                    balance_usdc, config.order_size, config.max_position_per_market, config.max_total_capital,
+                )
+        except Exception as e:
+            logger.debug("Auto-scale from balance: %s", e)
+
     # Bootstrap: one full quote cycle to get orders in the book immediately
     logger.info("Bootstrap: posting initial quotes for %d markets...", len(markets))
     try:
@@ -278,7 +310,7 @@ async def main_async() -> None:
                 break
             ts = getattr(ws_client, "last_activity_ts", 0) or 0
             if ts > 0 and (time.time() - ts) > WS_WATCHDOG_TIMEOUT:
-                logger.warning("Watchdog: no WS activity for %ds, cancelling orders and halting %ds...", WS_WATCHDOG_TIMEOUT, WS_WATCHDOG_HALT_SECONDS)
+                logger.warning("Network Timeout - Emergency Halt: no price update for %ds. Cancelling orders and halting %ds...", WS_WATCHDOG_TIMEOUT, WS_WATCHDOG_HALT_SECONDS)
                 try:
                     loop = asyncio.get_running_loop()
                     await loop.run_in_executor(None, lambda: cancel_all_orders(client, config))
