@@ -216,8 +216,11 @@ async def main_async() -> None:
                 effective = balance_usdc * 0.85
                 n = max(1, config.max_active_markets)
                 per_market = effective / n
-                order_cap = max(5, min(config.order_size, per_market * 0.2))
-                pos_cap = max(10, min(config.max_position_per_market, per_market * 0.5))
+                # More aggressive when balance > $500 (2026 rebate target)
+                order_pct = 0.25 if balance_usdc > 500 else 0.20
+                pos_pct = 0.60 if balance_usdc > 500 else 0.50
+                order_cap = max(5, min(config.order_size, per_market * order_pct))
+                pos_cap = max(10, min(config.max_position_per_market, per_market * pos_pct))
                 config.max_total_capital = effective
                 config.max_position_per_market = pos_cap
                 config.order_size = order_cap
