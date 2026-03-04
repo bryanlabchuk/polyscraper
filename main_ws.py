@@ -300,7 +300,7 @@ async def main_async() -> None:
                 break
             ts = getattr(ws_client, "last_activity_ts", 0) or 0
             if ts > 0 and (time.time() - ts) > WS_WATCHDOG_TIMEOUT:
-                logger.warning("Network Lag Alert: no WS activity for %ds. Cancelling orders and halting %ds...", WS_WATCHDOG_TIMEOUT, WS_WATCHDOG_HALT_SECONDS)
+                logger.warning("Network Timeout - Emergency Halt: no price update for %ds. Cancelling orders and halting %ds...", WS_WATCHDOG_TIMEOUT, WS_WATCHDOG_HALT_SECONDS)
                 try:
                     loop = asyncio.get_running_loop()
                     await loop.run_in_executor(None, lambda: cancel_all_orders(client, config))
