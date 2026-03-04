@@ -27,7 +27,8 @@ class BotConfig:
     max_position_per_market: float = 50.0  # Max exposure per market
     max_total_capital: float = 150.0  # Total capital
     max_active_markets: int = 2  # Concentrate capital for better priority
-    quote_refresh_seconds: int = 0  # 0 = fastest cycle (near rate limit)
+    quote_refresh_seconds: int = 15  # Seconds between cycles; 0 = fastest (higher risk of rate limit)
+    min_quote_interval_seconds: float = 2.5  # WS: min seconds between quote updates per market (let orders get filled)
     minutes_before_resolution_to_stop: int = 2  # 3x more trading time vs 4 min stop
 
     # BTC 5m market discovery
@@ -112,6 +113,9 @@ class BotConfig:
         self.max_active_markets = int(os.getenv("MAX_ACTIVE_MARKETS", str(self.max_active_markets)))
         self.spread_bps = int(os.getenv("SPREAD_BPS", str(self.spread_bps)))
         self.quote_refresh_seconds = int(os.getenv("QUOTE_REFRESH_SECONDS", str(self.quote_refresh_seconds)))
+        self.min_quote_interval_seconds = float(
+            os.getenv("MIN_QUOTE_INTERVAL_SECONDS", str(self.min_quote_interval_seconds))
+        )
         self.minutes_before_resolution_to_stop = int(
             os.getenv("MINUTES_BEFORE_RESOLUTION_TO_STOP", str(self.minutes_before_resolution_to_stop))
         )

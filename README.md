@@ -42,8 +42,12 @@ cp .env.example PMSC.env
 ### 3. Wallet & Approvals
 
 - **Private key**: See [SETUP_CHECKLIST.md](SETUP_CHECKLIST.md) for how to get your private key (MetaMask export, etc.).
+- **FUNDER (critical)**: Set to your **Polymarket profile address** (top-right of polymarket.com), NOT your MetaMask address. Without this, orders fail with "invalid signature". Find it: click your profile → URL shows `polymarket.com/profile/0x...` — use that `0x...` as `FUNDER` in PMSC.env.
 - **USDC.e on Polygon**: You need USDC.e to trade. Bridge from Ethereum or buy on Polygon.
 - **Token Approvals**: EOA/MetaMask users must approve USDC and CTF tokens. See [Polymarket Token Allowances](https://github.com/Polymarket/py-clob-client#important-token-allowances-for-metamaskeoa-users).
+- **If you get "invalid signature"**: Run `python verify_setup.py` to check balances/allowances. If allowances are 0, run `python set_allowances.py` (needs POL for gas). Use **FUNDER** = your Polymarket profile address (from the profile URL) and **SIGNATURE_TYPE=0** (EOA). See [MAKE_IT_WORK.md](MAKE_IT_WORK.md) for full steps.
+- **Rate limiting (429 / Cloudflare 1015)**: Polymarket may temporarily block your IP. The bot will retry with backoff. To use a **different IP**: (1) **Mobile hotspot** — turn on hotspot on your phone, connect your computer to it, then run the bot; (2) **VPN** — connect to any VPN server and run the bot; (3) **Another network** — run from home, office, or a different Wi‑Fi. Or wait 15–30 minutes and try again from the same IP.
+- **"No route to host" / No active markets**: Your network can't reach `gamma-api.polymarket.com` (market discovery). Some VPNs or firewalls block it. Try **without VPN**, or switch VPN server; if on VPN to fix 429, try disconnecting once CLOB works and use your normal connection for gamma.
 
 ### 4. Run
 
@@ -66,7 +70,7 @@ Edit `config.py` or set env vars:
 | `max_total_capital` | 150 | Total capital (6 × $25) |
 | `max_active_markets` | 6 | Markets to quote (diversification) |
 | `spread_bps` | 38 | Spread in basis points |
-| `quote_refresh_seconds` | 0 | Base seconds between cycles (0 = near rate limit) |
+| `quote_refresh_seconds` | 15 | Base seconds between cycles; use 15–30 to avoid rate limits, 0 for fastest |
 | `minutes_before_resolution_to_stop` | 2 | Stop quoting N min before resolution (safer) |
 | `arb_enabled` | true | Enable arb: lock-in profit by buying both Up+Down when cheap |
 | `arb_bid_price` | 0.48 | Bid on both sides (0.48+0.48=0.96 cost, $1 payout) |

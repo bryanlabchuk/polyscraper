@@ -42,7 +42,10 @@ logger = logging.getLogger(__name__)
 _market_fail_cooldown: dict[str, float] = {}
 # Trailing midpoint: don't update quotes until mid moves enough. condition_id -> last_quoted_mid
 _last_quoted_mid: dict[str, float] = {}
+# Throttle: condition_id -> last quote timestamp (let orders sit on book long enough to get filled)
+_last_quote_ts: dict[str, float] = {}
 COOLDOWN_SECONDS = 300  # 5 min
+MIN_QUOTE_INTERVAL_SECONDS = 2.5  # Don't cancel/repost same market more than once per 2.5s
 
 
 def _jitter(value: float, pct: int, enabled: bool) -> float:
@@ -154,9 +157,14 @@ def run_single_market_quote(
     Call when book or price_change indicates a real price move.
     Returns True if quotes were posted.
     """
-    global _market_fail_cooldown
+    global _market_fail_cooldown, _last_quote_ts
     now = time.time()
     if market.condition_id in _market_fail_cooldown:
+        return False
+    # Throttle: let orders sit on book at least 2.5s so they can get filled
+    min_interval = getattr(config, "min_quote_interval_seconds", MIN_QUOTE_INTERVAL_SECONDS)
+    last_ts = _last_quote_ts.get(market.condition_id, 0)
+    if now - last_ts < min_interval:
         return False
     if not should_quote_market(market, config):
         return False
@@ -179,7 +187,8 @@ def run_single_market_quote(
         _last_quoted_mid[market.condition_id] = mid
 
     depth = book_summary.get("depth") or 0
-    if config.min_book_depth > 0 and depth < config.min_book_depth:
+    # Only enforce min_book_depth when we have depth data (full book). price_change has depth=0.
+    if depth > 0 and config.min_book_depth > 0 and depth < config.min_book_depth:
         return False
 
     seeking_signal = None
@@ -222,6 +231,8 @@ def run_single_market_quote(
     size = max(market.min_size, min(size, config.max_position_per_market, per_market_cap))
 
     ok = post_two_sided_quotes(client, market, bid, ask, size, config)
+    if ok:
+        _last_quote_ts[market.condition_id] = now
     if ok and config.secondary_level_enabled:
         post_secondary_quotes(client, market, mid, config.spread_bps, size, config)
     if not ok:
@@ -264,7 +275,8 @@ def run_market_making_cycle(config: BotConfig) -> None:
 
     client = create_client(config, read_only=False)
     if not client:
-        logger.error("No client available")
+        logger.error("No client available (often 429 rate limit). Backing off 60s.")
+        time.sleep(60)
         return
 
     # Log new fills to fills_log.csv for analysis

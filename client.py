@@ -1,10 +1,13 @@
 """Polymarket CLOB client wrapper for market making."""
 
 import logging
+import os
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
 from py_clob_client.client import ClobClient
+from py_clob_client.exceptions import PolyApiException
 from py_clob_client.clob_types import BookParams, OrderArgs, OrderType, PostOrdersArgs, PartialCreateOrderOptions
 from py_clob_client.order_builder.constants import BUY, SELL
 
@@ -13,12 +16,32 @@ from markets import BTCMarket
 
 logger = logging.getLogger(__name__)
 
+# Reuse one client per run to avoid hitting key-derivation API every cycle (rate limits)
+_cached_client: Optional[ClobClient] = None
+_cached_client_key: Optional[str] = None
+
+
+def clear_client_cache() -> None:
+    """Clear cached client so next create_client() will re-derive API key (e.g. after 401)."""
+    global _cached_client, _cached_client_key
+    _cached_client = None
+    _cached_client_key = None
+
 
 def create_client(config: BotConfig, read_only: bool = False) -> Optional[ClobClient]:
-    """Create and return an authenticated Polymarket CLOB client."""
+    """Create and return an authenticated Polymarket CLOB client. Reuses cached client to avoid rate limits."""
+    global _cached_client, _cached_client_key
+
     if not config.private_key and not read_only:
         logger.error("PRIVATE_KEY required for trading")
         return None
+
+    if not read_only and _cached_client is not None:
+        cache_key = f"{config.private_key[:16]}:{config.funder or ''}:{config.signature_type}"
+        if _cached_client_key == cache_key:
+            return _cached_client
+        _cached_client = None
+        _cached_client_key = None
 
     client = ClobClient(
         config.clob_host,
@@ -29,13 +52,56 @@ def create_client(config: BotConfig, read_only: bool = False) -> Optional[ClobCl
     )
 
     if not read_only and config.private_key:
+        nonce = None
         try:
-            creds = client.create_or_derive_api_creds()
-            client.set_api_creds(creds)
-        except Exception as e:
-            logger.error("Failed to derive API credentials: %s", e)
-            return None
+            from web3 import Web3
+            w3 = Web3(Web3.HTTPProvider("https://polygon-rpc.com"))
+            addr = client.get_address()
+            if addr and w3.is_connected():
+                nonce = w3.eth.get_transaction_count(addr)
+        except Exception:
+            pass
 
+        force_derive = os.environ.get("FORCE_DERIVE_API_KEY", "").lower() in ("true", "1", "yes")
+        max_attempts = 3
+        backoff_seconds = 60
+
+        for attempt in range(max_attempts):
+            try:
+                if force_derive:
+                    creds = client.derive_api_key(nonce=nonce)
+                else:
+                    creds = client.create_or_derive_api_creds(nonce=nonce)
+                if creds:
+                    client.set_api_creds(creds)
+                    break
+                raise ValueError("create_or_derive_api_creds returned None")
+            except PolyApiException as e:
+                if getattr(e, "status_code", None) == 429:
+                    if attempt < max_attempts - 1:
+                        logger.warning(
+                            "Polymarket rate limit (429). Waiting %ds then retry %d/%d. "
+                            "If this persists, run from a different network (e.g. home) or wait 15–30 min.",
+                            backoff_seconds, attempt + 2, max_attempts,
+                        )
+                        time.sleep(backoff_seconds)
+                    else:
+                        logger.error(
+                            "Polymarket rate limit (429) after %d attempts. "
+                            "Run from a different IP (e.g. home network or mobile hotspot) or wait 15–30 min.",
+                            max_attempts,
+                        )
+                        return None
+                else:
+                    logger.error("Failed to derive API credentials: %s", e)
+                    return None
+            except Exception as e:
+                logger.error("Failed to derive API credentials: %s", e)
+                return None
+
+    if not read_only and client is not None:
+        _cached_client = client
+        _cached_client_key = f"{config.private_key[:16]}:{config.funder or ''}:{config.signature_type}"
     return client
 
 
@@ -171,13 +237,25 @@ def post_two_sided_quotes(
 
         resp = client.post_orders(orders)
         if isinstance(resp, list) and len(resp) > 0:
-            # Batch endpoint returns list of order responses
+            # Batch endpoint returns list; check for invalid signature or other errors
+            has_err = any(
+                isinstance(r, dict) and (r.get("errorCode") or (r.get("errorMsg") and "invalid" in str(r.get("errorMsg", "")).lower()))
+                for r in resp
+            )
+            if has_err:
+                err_msg = resp[0].get("errorMsg", resp[0]) if isinstance(resp[0], dict) else resp
+                logger.warning("Post orders failed: %s", err_msg)
+                return False
             logger.info("Posted quotes: bid=%.3f ask=%.3f on %s", bid_price, ask_price, market.event_slug[:30])
             return True
-        elif isinstance(resp, dict) and (resp.get("success") or resp.get("orderIDs") or resp.get("orderID")):
-            logger.info("Posted quotes: bid=%.3f ask=%.3f on %s", bid_price, ask_price, market.event_slug[:30])
-            return True
-        logger.warning("Post orders response: %s", resp)
+        elif isinstance(resp, dict):
+            if resp.get("errorCode") or resp.get("error"):
+                logger.warning("Post orders failed: %s", resp)
+                return False
+            if resp.get("success") or resp.get("orderIDs") or resp.get("orderID"):
+                logger.info("Posted quotes: bid=%.3f ask=%.3f on %s", bid_price, ask_price, market.event_slug[:30])
+                return True
+        logger.warning("Post orders unexpected response: %s", resp)
         return False
     except Exception as e:
         logger.error("Failed to post orders: %s", e)
@@ -493,6 +571,17 @@ def execute_arb_taker(
     except Exception as e:
         logger.warning("Arb taker failed: %s", e)
         return False
+
+
+def count_open_orders(client: ClobClient) -> int:
+    """Return count of open orders (diagnostic: verify orders reach Polymarket)."""
+    try:
+        from py_clob_client.clob_types import OpenOrderParams
+        orders = client.get_orders(OpenOrderParams())
+        return len(orders) if isinstance(orders, list) else 0
+    except Exception as e:
+        logger.debug("Failed to get open orders: %s", e)
+        return -1
 
 
 def cancel_all_orders(client: ClobClient, config: BotConfig) -> bool:
